@@ -1,0 +1,248 @@
+<script>
+Pages['dashboard'] = async function(container) {
+  container.innerHTML = '<div class="page-loader"><div class="spinner dark"></div><span>Memuat dashboard...</span></div>';
+  try {
+    const periodId = App.activePeriod?.period_id;
+    const raw  = await cachedApi('GET_DASHBOARD', { period_id: periodId }, 20);
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    App.dashboardData = data;
+    renderDashboard(container, data);
+  } catch(err) {
+    container.innerHTML = '...error html...';
+    lucide.createIcons();
+  }
+};
+
+function renderDashboard(container, data) {
+  const { summary, findings, sessions, period } = data;
+  const s = summary || {};
+  const recentFindings = (findings || []).slice(-10).reverse();
+
+  const statCards = [
+    { icon: 'clipboard-list', label: 'Total Temuan',         value: s.total||0,                            color: 'blue'    },
+    { icon: 'alert-circle',   label: 'Open',                 value: s.open||0,                             color: 'rose'    },
+    { icon: 'clock',          label: 'Menunggu Approval',    value: (s.pending_ca||0)+(s.pending_impl||0), color: 'amber'   },
+    { icon: 'check-square',   label: 'CA Approved',          value: s.ca_approved||0,                      color: 'purple'  },
+    { icon: 'upload',         label: 'Pending Implementasi', value: s.pending_impl||0,                     color: 'teal'    },
+    { icon: 'check-circle',   label: 'Closed',               value: s.closed||0,                           color: 'emerald' },
+  ];
+
+  const pct = s.total ? Math.round((s.closed / s.total) * 100) : 0;
+
+  container.innerHTML = `
+    <!-- Hero -->
+    <div class="page-hero mb-24">
+      <h1>Selamat datang, ${escHtml(App.profile?.nama?.split(' ')[0] || '')}
+        <i data-lucide="hand-metal" style="width:22px;height:22px;vertical-align:middle;margin-left:6px"></i>
+      </h1>
+      <p>${period
+        ? `Periode aktif: <strong style="color:#fff">${escHtml(period.nama_periode)}</strong> · ${(sessions||[]).length} sesi audit`
+        : 'Belum ada periode audit aktif'}</p>
+    </div>
+
+    <!-- Stat Cards -->
+    <div class="stat-grid">
+      ${statCards.map(c => `
+        <div class="stat-card ${c.color}">
+          <div style="margin-bottom:10px">
+            <i data-lucide="${c.icon}" style="width:24px;height:24px;opacity:.7"></i>
+          </div>
+          <div class="stat-value">${c.value}</div>
+          <div class="stat-label">${c.label}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- Progress Bar -->
+    <div class="card mb-24">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-8">
+          <div class="fw-700">Progress Penyelesaian Temuan</div>
+          <div class="text-muted text-sm">${pct}% selesai</div>
+        </div>
+        <div style="height:10px;background:var(--bg);border-radius:10px;overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--blue),var(--emerald));border-radius:10px;transition:width .8s ease;"></div>
+        </div>
+        <div class="flex gap-16 mt-8" style="flex-wrap:wrap;">
+          <div class="text-xs text-muted" style="display:flex;align-items:center;gap:4px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:var(--rose);display:inline-block"></span>
+            Open: ${s.open||0}
+          </div>
+          <div class="text-xs text-muted" style="display:flex;align-items:center;gap:4px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:var(--amber);display:inline-block"></span>
+            Pending: ${(s.pending_ca||0)+(s.pending_impl||0)}
+          </div>
+          <div class="text-xs text-muted" style="display:flex;align-items:center;gap:4px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:var(--emerald);display:inline-block"></span>
+            Closed: ${s.closed||0}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;" class="dashboard-grid">
+
+      <!-- Session Status -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Status Sesi Audit</div>
+            <div class="card-subtitle">${(sessions||[]).length} area dalam periode ini</div>
+          </div>
+        </div>
+        <div style="max-height:280px;overflow-y:auto;">
+          <table>
+            <thead><tr><th>Area</th><th>Status</th><th>Temuan</th></tr></thead>
+            <tbody>
+              ${(sessions||[]).length === 0
+                ? `<tr><td colspan="3">
+                    <div class="empty-state" style="padding:30px">
+                      <i data-lucide="inbox" style="width:32px;height:32px;opacity:.2;margin-bottom:10px"></i>
+                      <div class="empty-desc">Belum ada sesi audit</div>
+                    </div>
+                  </td></tr>`
+                : sessions.map(s => {
+                    const count = (findings||[]).filter(f => f.session_id === s.session_id).length;
+                    return `<tr>
+                      <td>
+                        <strong>${escHtml(s.nama_area)}</strong>
+                        <div class="text-xs text-muted">${escHtml(s.kategori)}</div>
+                      </td>
+                      <td>${statusBadge(s.status)}</td>
+                      <td><span class="font-mono fw-700">${count}</span></td>
+                    </tr>`;
+                  }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- My Tasks -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Tugas Saya</div>
+            <div class="card-subtitle">Yang membutuhkan tindakan Anda</div>
+          </div>
+        </div>
+        <div class="card-body" id="my-tasks-body">
+          ${renderMyTasks(findings || [], sessions || [])}
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Findings -->
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Temuan Terbaru</div>
+          <div class="card-subtitle">10 temuan terakhir</div>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="navigateTo('findings')">
+          Lihat Semua
+          <i data-lucide="arrow-right" style="width:13px;height:13px"></i>
+        </button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>ID</th><th>Area</th><th>Persyaratan</th><th>Status Temuan</th><th>Jenis</th><th>Dibuat</th>
+          </tr></thead>
+          <tbody>
+            ${recentFindings.length === 0
+              ? `<tr><td colspan="6">
+                  <div class="empty-state" style="padding:40px">
+                    <i data-lucide="search" style="width:36px;height:36px;opacity:.2;margin-bottom:12px"></i>
+                    <div class="empty-title">Belum ada temuan</div>
+                  </div>
+                </td></tr>`
+              : recentFindings.map(f => {
+                  const sess = (sessions||[]).find(s => s.session_id === f.session_id);
+                  return `<tr>
+                    <td class="td-mono">${escHtml(f.finding_id?.split('_').pop() || f.finding_id)}</td>
+                    <td><strong>${escHtml(sess?.nama_area || '—')}</strong></td>
+                    <td><span class="font-mono text-muted">#${f.nomor_persyaratan}.${f.check_item_no}</span></td>
+                    <td>${statusBadge(f.finding_status)}</td>
+                    <td>${statusBadge(f.status_persyaratan)}</td>
+                    <td class="text-muted text-sm">${timeAgo(f.created_at)}</td>
+                  </tr>`;
+                }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  // Responsive grid
+  if (window.innerWidth < 768) {
+    const grid = container.querySelector('.dashboard-grid');
+    if (grid) grid.style.gridTemplateColumns = '1fr';
+  }
+
+  lucide.createIcons();
+}
+
+// Task icon mapping — lucide icon name per task type
+const TASK_ICONS = {
+  approve_ca:    'pen-line',
+  approve_impl:  'image',
+  isi_ca:        'wrench',
+  upload_bukti:  'camera',
+  close:         'lock',
+  default:       'circle-dot',
+};
+
+function renderMyTasks(findings, sessions) {
+  const role   = App.profile?.role_sistem;
+  const tasks  = [];
+
+  findings.forEach(f => {
+    const sess = sessions.find(s => s.session_id === f.session_id);
+    if (!sess) return;
+    const area = escHtml(sess.nama_area);
+
+    if (role === 'DeptHead') {
+      if (f.finding_status === 'PENDING_CA'   && f.ca_depthead_status   === 'PENDING')
+        tasks.push({ icon: TASK_ICONS.approve_ca,   text: `Approve CA — ${area}`,   page: 'approval',          params: { finding_id: f.finding_id, stage: 'CA',   level: 'DeptHead' } });
+      if (f.finding_status === 'PENDING_IMPL' && f.impl_depthead_status === 'PENDING')
+        tasks.push({ icon: TASK_ICONS.approve_impl, text: `Approve Impl — ${area}`, page: 'approval',          params: { finding_id: f.finding_id, stage: 'IMPL', level: 'DeptHead' } });
+    }
+
+    if (App.profile?.isAuditor) {
+      if (f.finding_status === 'PENDING_CA'   && f.ca_auditor_status   === 'PENDING' && f.ca_depthead_status   === 'APPROVED')
+        tasks.push({ icon: TASK_ICONS.approve_ca,   text: `Approve CA — ${area}`,   page: 'approval',          params: { finding_id: f.finding_id, stage: 'CA',   level: 'Auditor' } });
+      if (f.finding_status === 'PENDING_IMPL' && f.impl_auditor_status === 'PENDING' && f.impl_depthead_status === 'APPROVED')
+        tasks.push({ icon: TASK_ICONS.approve_impl, text: `Approve Impl — ${area}`, page: 'approval',          params: { finding_id: f.finding_id, stage: 'IMPL', level: 'Auditor' } });
+    }
+
+    if (role === 'IMS') {
+      if (f.finding_status === 'PENDING_CA'   && f.ca_ims_status   === 'PENDING' && f.ca_auditor_status   === 'APPROVED')
+        tasks.push({ icon: TASK_ICONS.approve_ca,   text: `Approve CA (Final) — ${area}`, page: 'approval',   params: { finding_id: f.finding_id, stage: 'CA',   level: 'IMS' } });
+      if (f.finding_status === 'PENDING_IMPL' && f.impl_ims_status === 'PENDING' && f.impl_auditor_status === 'APPROVED')
+        tasks.push({ icon: TASK_ICONS.close,        text: `Close Temuan — ${area}`,       page: 'approval',   params: { finding_id: f.finding_id, stage: 'IMPL', level: 'IMS' } });
+    }
+
+    if (f.finding_status === 'AGREED' && !f.ca_submitted_at)
+      tasks.push({ icon: TASK_ICONS.isi_ca,     text: `Isi CA — ${area} #${f.nomor_persyaratan}`,       page: 'corrective-action', params: { finding_id: f.finding_id } });
+    if (f.finding_status === 'CA_APPROVED' && !f.impl_submitted_at)
+      tasks.push({ icon: TASK_ICONS.upload_bukti, text: `Upload Bukti — ${area} #${f.nomor_persyaratan}`, page: 'implementation',    params: { finding_id: f.finding_id } });
+  });
+
+  if (!tasks.length) return `
+    <div class="empty-state" style="padding:20px 0">
+      <i data-lucide="party-popper" style="width:32px;height:32px;opacity:.25;margin-bottom:10px"></i>
+      <div class="empty-desc">Tidak ada tugas yang perlu diselesaikan</div>
+    </div>`;
+
+  return tasks.slice(0, 8).map(t => `
+    <div onclick="navigateTo('${t.page}', ${JSON.stringify(t.params)})"
+      style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;cursor:pointer;transition:background .15s;margin-bottom:4px;"
+      onmouseover="this.style.background='var(--bg)'"
+      onmouseout="this.style.background='transparent'">
+      <div style="width:32px;height:32px;background:var(--bg);border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+        <i data-lucide="${t.icon}" style="width:15px;height:15px;color:var(--blue)"></i>
+      </div>
+      <div style="font-size:13px;font-weight:500;flex:1">${t.text}</div>
+      <i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--slate-light)"></i>
+    </div>`).join('');
+}
+</script>
