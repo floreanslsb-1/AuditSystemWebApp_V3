@@ -1,0 +1,3507 @@
+<script>
+Pages['admin'] = async function(container) {
+  if (!App.profile || !App.profile.isKoordinator) {
+    container.innerHTML =
+      '<div class="empty-state">' +
+        '<i data-lucide="lock" style="width:48px;height:48px;opacity:.3;margin-bottom:16px"></i>' +
+        '<div class="empty-title">Akses Ditolak</div>' +
+        '<div class="empty-desc">Halaman ini hanya untuk Koordinator Audit.</div>' +
+      '</div>';
+    lucide.createIcons();
+    return;
+  }
+  container.innerHTML =
+    '<div class="page-hero mb-24">' +
+      '<h1 style="display:flex;align-items:center;gap:10px">' +
+        '<i data-lucide="settings" style="width:24px;height:24px"></i> Administrasi Sistem' +
+      '</h1>' +
+      '<p>Kelola user, area, template checklist, dan periode audit</p>' +
+    '</div>' +
+    '<div class="tabs">' +
+      '<button class="tab-btn active" onclick="adminTab(\'users\',this)">' +
+        '<i data-lucide="users" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"></i>Users' +
+      '</button>' +
+      '<button class="tab-btn" onclick="adminTab(\'areas\',this)">' +
+        '<i data-lucide="building-2" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"></i>Areas' +
+      '</button>' +
+      '<button class="tab-btn" onclick="adminTab(\'checklist\',this)">' +
+        '<i data-lucide="clipboard-check" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"></i>Checklist Template' +
+      '</button>' +
+      '<button class="tab-btn" onclick="adminTab(\'periods\',this)">' +
+        '<i data-lucide="calendar" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"></i>Periode & Agenda' +
+      '</button>' +
+    '</div>' +
+    '<div id="admin-tab-content"></div>';
+  lucide.createIcons();
+  adminTab('users', container.querySelector('.tab-btn'));
+};
+
+function adminTab(tab, btn) {
+  document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  var content = document.getElementById('admin-tab-content');
+  var loaders = { users: loadAdminUsers, areas: loadAdminAreas, checklist: loadAdminChecklist, periods: loadAdminPeriods };
+  content.innerHTML = '<div class="page-loader"><div class="spinner dark"></div></div>';
+  if (loaders[tab]) loaders[tab](content);
+}
+
+// ── USERS ─────────────────────────────────────────────────────
+async function loadAdminUsers(container) {
+  var users = await cachedApi('GET_USERS', {}, 300);
+  var rows = users.map(function(u, i) {
+    return '<tr>' +
+      '<td class="user-chk-cell" style="width:36px;text-align:center;display:none"><input type="checkbox" class="user-chk" value="' + escHtml(u.email) + '" style="width:14px;height:14px;accent-color:var(--rose)"></td>' +
+      '<td class="text-sm text-muted" style="width:48px;text-align:center">' + (i + 1) + '</td>' +
+      '<td>' +
+        '<div><strong>' + escHtml(u.nama) + '</strong></div>' +
+        '<div style="font-size:11px;color:var(--text-muted);font-family:monospace">' + escHtml((u.email || '').split('@')[0]) + '</div>' +
+      '</td>' +
+      '<td>' + renderRolesBadges(u.roles) + '</td>' +
+      '<td><div class="flex gap-8">' +
+        '<button class="btn btn-ghost btn-icon" title="Edit" data-user=\'' + JSON.stringify(u).replace(/'/g,"&#39;") + '\' onclick="var btn=this;singleClick(btn,function(){ openUserModal(JSON.parse(btn.dataset.user)) })">' +
+          '<i data-lucide="pencil" style="width:13px;height:13px"></i>' +
+        '</button>' +
+        '<button class="btn btn-ghost btn-icon" title="Hapus" onclick="singleClick(this,function(btn){ deleteUser(\'' + u.email + '\', btn) })">' +
+          '<i data-lucide="trash-2" style="width:13px;height:13px;color:var(--rose)"></i>' +
+        '</button>' +
+      '</div></td>' +
+    '</tr>';
+  }).join('');
+
+  container.innerHTML =
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<div><div class="card-title">Daftar User</div>' +
+        '<div class="card-subtitle">' + users.length + ' user terdaftar</div></div>' +
+        '<div class="flex gap-8">' +
+          '<button class="btn btn-danger btn-sm" id="user-delete-selected-btn" style="display:none" onclick="singleClick(this,function(){ batchDeleteSelectedUsers() })">' +
+            '<i data-lucide="trash-2" style="width:14px;height:14px"></i> Hapus Terpilih (<span id="user-selected-count">0</span>)' +
+          '</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="singleClick(this,function(){ openBulkUserModal() })">' +
+            '<i data-lucide="upload" style="width:14px;height:14px"></i> Import Banyak' +
+          '</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="singleClick(this,function(){ openUserModal() })">' +
+            '<i data-lucide="plus" style="width:14px;height:14px"></i> Tambah User' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="table-wrap"><table>' +
+        '<thead><tr>' +
+          '<th id="user-chk-col" style="width:36px;display:none"><input type="checkbox" id="user-chk-all" style="width:14px;height:14px;accent-color:var(--rose)" onclick="toggleAllUserCheckboxes(this)"></th>' +
+          '<th style="width:48px">No</th><th>Nama</th><th>Roles</th>' +
+          '<th><button class="btn btn-ghost btn-sm" id="user-aksi-btn" onclick="toggleUserDeleteMode()" style="font-size:11px;font-weight:600;letter-spacing:.05em;padding:3px 8px">AKSI</button></th>' +
+        '</tr></thead>' +
+        '<tbody>' + (users.length ? rows : '<tr><td colspan="6"><div class="empty-state" style="padding:40px"><div class="empty-desc">Belum ada user.</div></div></td></tr>') + '</tbody>' +
+      '</table></div>' +
+      '<div style="padding:14px 20px;background:var(--bg);border-top:1px solid var(--border);font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:8px;">' +
+        '<i data-lucide="info" style="width:13px;height:13px;flex-shrink:0"></i>' +
+        'Auditee per area dikelola di tab Areas.' +
+      '</div>' +
+    '</div>';
+  lucide.createIcons();
+  _attachUserCheckboxListeners();
+  
+}
+
+function renderRolesBadges(rolesStr) {
+  if (!rolesStr) return '<span class="badge badge-slate">Viewer</span>';
+  var map = { Koordinator: 'badge-purple', Auditor: 'badge-teal' };
+  return String(rolesStr).split(',').map(function(r) { r = r.trim(); return '<span class="badge ' + (map[r] || 'badge-slate') + '" style="margin-right:3px">' + r + '</span>'; }).join('');
+}
+
+async function openUserModal(user) {
+  user = user || null;
+  var isEdit       = !!user;
+  var currentRoles = user && user.roles ? String(user.roles).split(',').map(function(r) { return r.trim(); }) : [];
+
+  createModal({
+    id: 'user-modal',
+    title: isEdit ? 'Edit User: ' + user.nama : 'Tambah User Baru',
+    body:
+      '<input type="hidden" id="um-email-lama" value="' + escHtml(user ? user.email : '') + '">' +
+      '<div class="form-group">' +
+        '<label class="form-label">Nama Lengkap <span class="required">*</span></label>' +
+        '<input class="form-control" id="um-nama" value="' + escHtml(user ? user.nama : '') + '" placeholder="Nama Lengkap">' +
+        '<div id="um-email-preview" style="font-size:12px;color:var(--text-muted);margin-top:6px;font-family:monospace;min-height:18px">' +
+          (user && user.nama ? '→ ' + nameToEmail(user.nama) : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Roles <span class="required">*</span></label>' +
+        '<div style="display:flex;flex-direction:column;gap:4px;padding:14px;background:var(--bg);border-radius:var(--radius-sm);border:1.5px solid var(--border)">' +
+          [
+            { value: 'Koordinator', label: 'Koordinator Audit', icon: 'shield-check' },
+            { value: 'Auditor',     label: 'Auditor',           icon: 'search' },
+          ].map(function(r) {
+            return '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px;border-radius:6px">' +
+              '<input type="checkbox" id="um-role-' + r.value + '" value="' + r.value + '" ' + (currentRoles.includes(r.value) ? 'checked' : '') + ' style="flex-shrink:0;width:15px;height:15px;accent-color:var(--blue)">' +
+              '<div style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:13px">' +
+                '<i data-lucide="' + r.icon + '" style="width:13px;height:13px;color:var(--blue)"></i>' + r.label +
+              '</div>' +
+            '</label>';
+          }).join('') +
+        '</div>' +
+      '</div>',
+    footer:
+      '<button class="btn btn-outline" onclick="closeModal(\'user-modal\')">Batal</button>' +
+      '<button class="btn btn-primary" id="um-save-btn" onclick="singleClick(this,function(){ saveUser(' + isEdit + ') })">' +
+        (isEdit ? 'Simpan Perubahan' : 'Tambah User') +
+      '</button>',
+  });
+  lucide.createIcons();
+
+  var namaInput = document.getElementById('um-nama');
+  if (namaInput) {
+    namaInput.addEventListener('input', function() {
+      var preview = document.getElementById('um-email-preview');
+      if (preview) preview.textContent = this.value.trim() ? '→ ' + nameToEmail(this.value.trim()) : '';
+    });
+  }
+}
+
+async function saveUser(isEdit) {
+  var btn      = document.getElementById('um-save-btn');
+  var restore  = btnLoading(btn, isEdit ? 'Menyimpan...' : 'Menambahkan...', 'user-modal');
+  var nama     = document.getElementById('um-nama')       ? document.getElementById('um-nama').value.trim()       : '';
+  var emailLama = document.getElementById('um-email-lama') ? document.getElementById('um-email-lama').value        : '';
+  var emailBaru = nameToEmail(nama);
+  var roles    = ['Koordinator','Auditor'].filter(function(r) { return document.getElementById('um-role-' + r) && document.getElementById('um-role-' + r).checked; });
+  if (!nama)              { restore(); return toast('Nama wajib diisi.', 'error'); }
+  if (roles.length === 0) { restore(); return toast('Pilih minimal satu role.', 'error'); }
+  try {
+    if (isEdit) {
+      await api('UPDATE_USER', { email: emailLama, updates: { nama: nama, email: emailBaru, roles: roles.join(',') } });
+    } else {
+      await api('CREATE_USER', { email: emailBaru, nama: nama, roles: roles.join(',') });
+    }
+    clearCache('GET_USERS');
+    toast(isEdit ? 'User berhasil diperbarui.' : 'User berhasil ditambahkan.', 'success');
+    closeModal('user-modal');
+    loadAdminUsers(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function deleteUser(email, btn) {
+  var ok = await showConfirm({
+    title: 'Hapus User',
+    message: 'Hapus permanen ' + email + '?',
+    detail: 'Data yang sudah terhubung (sessions, findings) tidak ikut terhapus.',
+    confirmText: 'Hapus',
+    danger: true,
+  });
+  if (!ok) return;
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+  try {
+    await api('DELETE_USER', { email: email });
+    clearCache('GET_USERS');
+    toast('User ' + email + ' berhasil dihapus.', 'success');
+    loadAdminUsers(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+// ── AREAS ─────────────────────────────────────────────────────
+async function loadAdminAreas(container) {
+  var areas = await cachedApi('GET_AREAS', {}, 300);
+  window._allAreas = areas;
+  var rows = areas.map(function(a, i) {
+    return '<tr>' +
+      '<td class="area-chk-cell" style="width:36px;text-align:center;display:none"><input type="checkbox" class="area-chk" value="' + escHtml(a.area_id) + '" style="width:14px;height:14px;accent-color:var(--rose)"></td>' +
+      '<td class="text-sm text-muted" style="width:48px;text-align:center">' + (i + 1) + '</td>' +
+      '<td><span class="badge badge-blue">' + escHtml(a.kategori) + '</span></td>' +
+      '<td><strong>' + escHtml(a.dept) + '</strong></td>' +
+      '<td class="text-sm">' + escHtml(a.dept_head_name || (a.dept_head_email || '').split('@')[0]) + '</td>' +
+      '<td class="text-sm text-muted">' + escHtml(a.area_sampling || '—') + '</td>' +
+      '<td class="text-sm text-muted">' + (a.auditee_names
+        ? a.auditee_names.split('\n').map(function(n) {
+            return '<div>' + escHtml(n.trim()) + '</div>';
+          }).join('')
+        : (a.auditee_emails
+            ? a.auditee_emails.split(',').map(function(e) {
+                return '<div>' + escHtml(e.trim().split('@')[0]) + '</div>';
+              }).join('')
+            : '—')) + '</td>' +
+      '<td><div class="flex gap-8">' +
+        '<button class="btn btn-ghost btn-icon" title="Edit" data-area=\'' + JSON.stringify(a).replace(/'/g,"&#39;") + '\' onclick="var btn=this;singleClick(btn,function(){ openAreaModal(JSON.parse(btn.dataset.area)) })">' +
+          '<i data-lucide="pencil" style="width:13px;height:13px"></i>' +
+        '</button>' +
+        '<button class="btn btn-ghost btn-icon" title="Hapus" onclick="singleClick(this,function(btn){ deleteArea(\'' + a.area_id + '\', btn) })">' +
+          '<i data-lucide="trash-2" style="width:13px;height:13px;color:var(--rose)"></i>' +
+        '</button>' +
+      '</div></td>' +
+    '</tr>';
+  }).join('');
+
+  container.innerHTML =
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<div><div class="card-title">Daftar Area</div><div class="card-subtitle">' + areas.length + ' area terdaftar</div></div>' +
+        '<div class="flex gap-8">' +
+          '<button class="btn btn-danger btn-sm" id="area-delete-selected-btn" style="display:none" onclick="singleClick(this,function(){ batchDeleteSelectedAreas() })">' +
+            '<i data-lucide="trash-2" style="width:14px;height:14px"></i> Hapus Terpilih (<span id="area-selected-count">0</span>)' +
+          '</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="singleClick(this,function(){ openBulkAreaModal() })">' +
+            '<i data-lucide="upload" style="width:14px;height:14px"></i> Import Banyak' +
+          '</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="singleClick(this,function(){ openAreaModal() })">' +
+            '<i data-lucide="plus" style="width:14px;height:14px"></i> Tambah Area' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="table-wrap"><table>' +
+        '<thead><tr>' +
+          '<th id="area-chk-col" style="width:36px;display:none"><input type="checkbox" id="area-chk-all" style="width:14px;height:14px;accent-color:var(--rose)" onclick="toggleAllAreaCheckboxes(this)"></th>' +
+          '<th style="width:48px">No</th><th style="width:120px">Kategori</th><th>Departemen</th><th style="width:160px">Dept Head</th><th style="width:180px">Area Sampling</th><th>Auditee</th>' +
+          '<th><button class="btn btn-ghost btn-sm" id="area-aksi-btn" onclick="toggleAreaDeleteMode()" style="font-size:11px;font-weight:600;letter-spacing:.05em;padding:3px 8px">AKSI</button></th>' +
+        '</tr></thead>' +
+        '<tbody>' + (areas.length ? rows : '<tr><td colspan="8"><div class="empty-state" style="padding:40px"><div class="empty-desc">Belum ada area.</div></div></td></tr>') + '</tbody>' +
+      '</table></div>' +
+      '<div style="padding:14px 20px;background:var(--bg);border-top:1px solid var(--border);font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:8px;">' +
+        '<i data-lucide="info" style="width:13px;height:13px;flex-shrink:0"></i>' +
+        'Auditee terdaftar per area. Login auditee terdeteksi otomatis dari email.' +
+      '</div>' +
+    '</div>';
+  lucide.createIcons();
+  _attachAreaCheckboxListeners();
+}
+
+function openAreaModal(area) {
+  area = area || null;
+  var isEdit = !!area;
+  createModal({
+    id: 'area-modal',
+    title: isEdit ? 'Edit Area: ' + area.dept : 'Tambah Area Baru',
+    body:
+      '<div class="form-row">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Kategori <span class="required">*</span></label>' +
+          '<select class="form-control" id="am-kategori">' +
+            ['Office','Laboratorium','Maintenance','Produksi','Gudang'].map(function(k) {
+              return '<option value="' + k + '" ' + (area && area.kategori === k ? 'selected' : '') + '>' + k + '</option>';
+            }).join('') +
+          '</select>' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label class="form-label">Departemen <span class="required">*</span></label>' +
+          '<input class="form-control" id="am-dept" value="' + escHtml(area ? area.dept : '') + '" placeholder="e.g. Quality Control">' +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Nama Dept Head <span class="required">*</span></label>' +
+        '<input class="form-control" id="am-depthead-name" value="' + escHtml(area ? (area.dept_head_name || '') : '') + '" placeholder="Nama Lengkap Dept Head">' +
+        '<div id="am-depthead-email-preview" style="font-size:12px;color:var(--text-muted);margin-top:6px;font-family:monospace;min-height:18px">' +
+          (area && area.dept_head_name ? '→ ' + nameToEmail(area.dept_head_name) : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Nama Auditee <span class="required">*</span></label>' +
+        '<textarea class="form-control" id="am-auditee-names" rows="4" placeholder="Nama Lengkap Auditee 1&#10;Nama Lengkap Auditee 2&#10;...">' + escHtml(area ? (area.auditee_names || '') : '') + '</textarea>' +
+        '<div class="form-hint">Satu nama per baris. Email dibuat otomatis dari nama.</div>' +
+        '<div id="am-auditee-email-preview" style="' + (area && area.auditee_names ? '' : 'display:none') + ';margin-top:6px;font-size:12px;font-family:monospace;color:var(--text-muted);line-height:1.8">' +
+          (area && area.auditee_names
+            ? area.auditee_names.split('\n').filter(Boolean).map(function(n) { return '→ ' + nameToEmail(n.trim()); }).join('<br>')
+            : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Area Sampling</label>' +
+        '<textarea class="form-control" id="am-sampling" rows="3" placeholder="e.g. Gudang Transfer, Gudang Bahan Baku">' + escHtml(area ? area.area_sampling : '') + '</textarea>' +
+        '<div class="form-hint">Panduan lokasi yang harus dicek auditor. Opsional.</div>' +
+      '</div>',
+    footer:
+      '<button class="btn btn-outline" onclick="closeModal(\'area-modal\')">Batal</button>' +
+      '<button class="btn btn-primary" id="am-save-btn" onclick="singleClick(this,function(){ saveArea(\'' + (isEdit ? area.area_id : '') + '\') })">' +
+        (isEdit ? 'Simpan' : 'Tambah Area') +
+      '</button>',
+  });
+  lucide.createIcons();
+  // Live preview email dari nama
+  var deptInput = document.getElementById('am-depthead-name');
+  if (deptInput) {
+    deptInput.addEventListener('input', function() {
+      var preview = document.getElementById('am-depthead-email-preview');
+      if (preview) preview.textContent = this.value.trim() ? '→ ' + nameToEmail(this.value.trim()) : '';
+    });
+  }
+  var auditeeInput = document.getElementById('am-auditee-names');
+  if (auditeeInput) {
+    auditeeInput.addEventListener('input', function() {
+      var preview = document.getElementById('am-auditee-email-preview');
+      if (!preview) return;
+      var names = this.value.split('\n').map(function(n) { return n.trim(); }).filter(Boolean);
+      if (names.length === 0) { preview.style.display = 'none'; return; }
+      preview.style.display = '';
+      preview.innerHTML = names.map(function(n) { return '→ ' + nameToEmail(n); }).join('<br>');
+    });
+  }
+}
+
+async function saveArea(areaId) {
+  var btn     = document.getElementById('am-save-btn');
+  var restore = btnLoading(btn, areaId ? 'Menyimpan...' : 'Menambahkan...', 'area-modal');
+  var deptHeadName   = (document.getElementById('am-depthead-name')   ? document.getElementById('am-depthead-name').value.trim()   : '');
+  var auditeeNamesRaw = (document.getElementById('am-auditee-names') ? document.getElementById('am-auditee-names').value.trim() : '');
+
+  if (!document.getElementById('am-dept').value.trim()) { restore(); return toast('Dept wajib diisi.', 'error'); }
+  if (!deptHeadName)   { restore(); return toast('Nama Dept Head wajib diisi.', 'error'); }
+  if (!auditeeNamesRaw) { restore(); return toast('Nama Auditee wajib diisi.', 'error'); }
+
+  var auditeeNamesList  = auditeeNamesRaw.split('\n').map(function(n) { return n.trim(); }).filter(Boolean);
+  var auditeeEmailsList = auditeeNamesList.map(nameToEmail);
+
+  var data = {
+    kategori:        document.getElementById('am-kategori').value,
+    dept:            document.getElementById('am-dept').value.trim(),
+    dept_head_email: nameToEmail(deptHeadName),
+    dept_head_name:  deptHeadName,
+    area_sampling:   document.getElementById('am-sampling') ? document.getElementById('am-sampling').value.trim() : '',
+    auditee_emails:  auditeeEmailsList.join(','),
+    auditee_names:   auditeeNamesList.join('\n'),
+  };
+  try {
+    if (areaId) {
+      await api('UPDATE_AREA', { area_id: areaId, updates: data });
+    } else {
+      await api('CREATE_AREA', data);
+    }
+    clearCache('GET_AREAS');
+    toast(areaId ? 'Area berhasil diperbarui.' : 'Area berhasil ditambahkan.', 'success');
+    closeModal('area-modal');
+    loadAdminAreas(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function deleteArea(areaId, btn) {
+  var ok = await showConfirm({
+    title: 'Hapus Area',
+    message: 'Hapus area ini?',
+    detail: 'Pastikan tidak ada agenda aktif yang mengacu ke area ini.',
+    confirmText: 'Hapus',
+    danger: true,
+  });
+  if (!ok) return;
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+  try {
+    await api('DELETE_AREA', { area_id: areaId });
+    clearCache('GET_AREAS');
+    toast('Area berhasil dihapus.', 'success');
+    loadAdminAreas(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+// ── CHECKLIST ─────────────────────────────────────────────────
+async function loadAdminChecklist(container) {
+  var items = await cachedApi('GET_CHECKLIST_MASTER', {}, 300);
+  var general  = items.filter(function(i) { return i.tipe === 'GENERAL'; });
+  var khusus   = items.filter(function(i) { return i.tipe === 'KHUSUS'; });
+  var kategoriList = ['Laboratorium','Office','Maintenance','Produksi','Gudang'];
+
+  container.innerHTML =
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<div><div class="card-title">Checklist Master</div>' +
+        '<div class="card-subtitle">' + general.length + ' item general · ' + khusus.length + ' item khusus</div></div>' +
+        '<div class="flex gap-8">' +
+          '<button class="btn btn-danger btn-sm" id="cl-delete-selected-btn" style="display:none" onclick="singleClick(this,function(){ batchDeleteSelectedCl() })">' +
+            '<i data-lucide="trash-2" style="width:14px;height:14px"></i> Hapus Terpilih (<span id="cl-selected-count">0</span>)' +
+          '</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="singleClick(this,function(btn){ refreshChecklistCache(btn) })">' +
+            '<i data-lucide="refresh-cw" style="width:13px;height:13px"></i> Refresh' +
+          '</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="singleClick(this,function(){ openBulkChecklistModal() })">' +
+            '<i data-lucide="upload" style="width:14px;height:14px"></i> Import Banyak' +
+          '</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="singleClick(this,function(){ openChecklistModal() })">' +
+            '<i data-lucide="plus" style="width:14px;height:14px"></i> Tambah Item' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="tabs">' +
+          '<button class="tab-btn active" onclick="clTab(\'general\',this)">General (' + general.length + ')</button>' +
+          kategoriList.map(function(k) {
+            var count = khusus.filter(function(i) { return i.kategori === k; }).length;
+            return '<button class="tab-btn" onclick="clTab(\'' + k + '\',this)">' + k + ' (' + count + ')</button>';
+          }).join('') +
+        '</div>' +
+        '<div id="cl-tab-content">' + renderChecklistTable(window._lastClTab && window._lastClTab !== 'general'
+          ? items.filter(function(i) { return i.tipe === 'KHUSUS' && i.kategori === window._lastClTab; })
+          : general) + '</div>' +
+      '</div>' +
+    '</div>';
+  window._allChecklistItems = items;
+
+  // Restore tab terakhir
+  var lastTab = window._lastClTab || 'general';
+  var activeBtn = document.querySelector('.tab-btn[onclick*="clTab(\'' + lastTab + '\'"]');
+  if (activeBtn) {
+    document.querySelectorAll('.card-body .tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    activeBtn.classList.add('active');
+  }
+
+  lucide.createIcons();
+  _attachClCheckboxListeners();
+}
+
+function clTab(tipe, btn) {
+  btn.parentElement.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  window._lastClTab = tipe;
+  var items = tipe === 'general'
+    ? window._allChecklistItems.filter(function(i) { return i.tipe === 'GENERAL'; })
+    : window._allChecklistItems.filter(function(i) { return i.tipe === 'KHUSUS' && i.kategori === tipe; });
+  document.getElementById('cl-tab-content').innerHTML = renderChecklistTable(items);
+  lucide.createIcons();
+  _attachClCheckboxListeners();
+}
+
+function renderChecklistTable(items) {
+  if (!items.length) return '<div class="empty-state" style="padding:40px"><div class="empty-desc">Belum ada item.</div></div>';
+
+  var sorted = items.slice().sort(function(a, b) { return Number(a.nomor) - Number(b.nomor); });
+  var rows = '';
+  var lastPersyaratan = null;
+
+  sorted.forEach(function(t) {
+    var isNewPersyaratan = t.persyaratan !== lastPersyaratan;
+    lastPersyaratan = t.persyaratan;
+
+    var btnData    = 'data-item=\'' + JSON.stringify(t).replace(/'/g,"&#39;") + '\'';
+    var btnOnclick = 'var btn=this;singleClick(btn,function(){ openChecklistModal(JSON.parse(btn.dataset.item)) })';
+
+    rows +=
+      '<tr' + (isNewPersyaratan && rows !== '' ? ' style="border-top:2px solid var(--border)"' : '') + '>' +
+        '<td class="cl-chk-cell" style="width:36px;text-align:center;display:none">' +
+          '<input type="checkbox" class="cl-chk" value="' + escHtml(t.item_id) + '" style="width:14px;height:14px;accent-color:var(--rose)">' +
+        '</td>' +
+        '<td class="text-sm text-muted" style="width:48px;text-align:center">' + t.nomor + '</td>' +
+        '<td style="width:90px">' +
+          (isNewPersyaratan ? '<span class="badge badge-blue">' + escHtml(t.aspek) + '</span>' : '') +
+        '</td>' +
+        '<td style="max-width:200px;font-size:12px">' +
+          (isNewPersyaratan ? '<strong>' + escHtml(t.persyaratan) + '</strong>' : '') +
+        '</td>' +
+        '<td style="max-width:220px;font-size:12px">' + escHtml(t.check_item) + '</td>' +
+        '<td style="max-width:180px;font-size:11px" class="text-muted">' + escHtml(t.standar_check_item || '—') + '</td>' +
+        '<td style="max-width:140px">' + (t.labels
+          ? t.labels.split(',').map(function(l) {
+              return '<span class="badge badge-slate" style="font-size:10px;margin:1px">' + escHtml(l.trim()) + '</span>';
+            }).join('')
+          : '') + '</td>' +
+        '<td style="width:70px">' + ((t.aktif === true || t.aktif === 'TRUE') ? '<span class="badge badge-emerald">Aktif</span>' : '<span class="badge badge-slate">Nonaktif</span>') + '</td>' +
+        '<td style="width:48px"><button class="btn btn-ghost btn-icon" ' + btnData + ' onclick="' + btnOnclick + '">' +
+          '<i data-lucide="pencil" style="width:13px;height:13px"></i>' +
+        '</button></td>' +
+      '</tr>';
+  });
+
+  return '<div class="table-wrap"><table>' +
+    '<thead><tr>' +
+      '<th id="cl-chk-col" style="width:36px;display:none"><input type="checkbox" id="cl-chk-all" style="width:14px;height:14px;accent-color:var(--rose)" onclick="toggleAllClCheckboxes(this)"></th>' +
+      '<th style="width:48px">No</th>' +
+      '<th style="width:90px">Aspek</th>' +
+      '<th style="max-width:200px">Persyaratan</th>' +
+      '<th>Check Item</th>' +
+      '<th style="max-width:180px">Standar</th>' +
+      '<th style="max-width:140px">Labels</th>' +
+      '<th style="width:70px">Status</th>' +
+      '<th><button class="btn btn-ghost btn-sm" id="cl-aksi-btn" onclick="toggleClDeleteMode()" style="font-size:11px;font-weight:600;letter-spacing:.05em;padding:3px 8px">AKSI</button></th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+    '</table></div>';
+}
+
+function _getExistingLabels() {
+  var items = window._allChecklistItems || [];
+  var labelSet = {};
+  items.forEach(function(i) {
+    if (i.labels) {
+      i.labels.split(',').forEach(function(l) {
+        var t = l.trim();
+        if (t) labelSet[t] = true;
+      });
+    }
+  });
+  return Object.keys(labelSet).sort();
+}
+
+function openChecklistModal(item) {
+  item = item || null;
+  var isEdit = !!item;
+  createModal({
+    id: 'cl-modal',
+    title: isEdit ? 'Edit Checklist Item' : 'Tambah Checklist Item',
+    size: 'modal-lg',
+    body:
+      '<div class="form-row">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Tipe <span class="required">*</span></label>' +
+          '<select class="form-control" id="cl-tipe" onchange="toggleKategoriField()">' +
+            '<option value="GENERAL" ' + (item && item.tipe === 'GENERAL' ? 'selected' : '') + '>General</option>' +
+            '<option value="KHUSUS" '  + (item && item.tipe === 'KHUSUS'  ? 'selected' : '') + '>Khusus</option>' +
+          '</select>' +
+        '</div>' +
+        '<div class="form-group" id="cl-kat-group" style="' + (item && item.tipe === 'KHUSUS' ? '' : 'opacity:.4;pointer-events:none') + '">' +
+          '<label class="form-label">Kategori</label>' +
+          '<select class="form-control" id="cl-kategori">' +
+            ['Laboratorium','Office','Maintenance','Produksi','Gudang'].map(function(k) {
+              return '<option ' + (item && item.kategori === k ? 'selected' : '') + '>' + k + '</option>';
+            }).join('') +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Nomor <span class="required">*</span></label>' +
+          '<input class="form-control" id="cl-nomor" type="number" min="1" value="' + (item ? item.nomor : '') + '" placeholder="1, 2, 3...">' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label class="form-label">Aspek <span class="required">*</span></label>' +
+          '<select class="form-control" id="cl-aspek">' +
+            ['Plan','Do','Check','Action'].map(function(a) { return '<option ' + (item && item.aspek === a ? 'selected' : '') + '>' + a + '</option>'; }).join('') +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Persyaratan <span class="required">*</span></label>' +
+        '<input class="form-control" id="cl-persyaratan" value="' + escHtml(item ? item.persyaratan : '') + '" placeholder="e.g. ISO 6.7 - Kesiapsiagaan dan Tanggap Darurat">' +
+        '<div class="form-hint">Persyaratan yang sama bisa dipakai di banyak check item.</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Check Item <span class="required">*</span></label>' +
+        '<input class="form-control" id="cl-item" value="' + escHtml(item ? item.check_item : '') + '" placeholder="e.g. Apakah ada prosedur tanggap darurat?">' +
+        '<div class="form-hint">Satu check item per form. Setiap non-comply = satu temuan.</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Standar Check Item</label>' +
+        '<textarea class="form-control" id="cl-standar" rows="2" placeholder="e.g. Sampling min. 2 risiko per kategori">' + escHtml(item ? (item.standar_check_item || '') : '') + '</textarea>' +
+        '<div class="form-hint">Kriteria atau referensi standar untuk check item ini.</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Labels</label>' +
+        '<input class="form-control" id="cl-labels" value="' + escHtml(item ? (item.labels || '') : '') + '" placeholder="e.g. Exclude GAF, IMS Only">' +
+        '<div class="form-hint">Pisah koma jika lebih dari 1. Digunakan untuk filter saat membuat audit plan.</div>' +
+        (window._allChecklistItems && _getExistingLabels().length
+          ? '<div style="margin-top:6px;font-size:11px;color:var(--text-muted)">Label yang sudah ada: ' +
+              _getExistingLabels().map(function(l) {
+                return '<span onclick="var el=document.getElementById(\'cl-labels\');el.value=(el.value?el.value+\', \':\'\')+\'' + escHtml(l) + '\'" ' +
+                  'style="cursor:pointer;display:inline-block;padding:1px 8px;background:var(--bg);border:1px solid var(--border);border-radius:10px;margin:2px;font-size:11px">' +
+                  escHtml(l) + '</span>';
+              }).join('') +
+            '</div>'
+          : '') +
+      '</div>' +
+      (isEdit
+        ? '<div class="form-group"><label class="form-label">Status</label>' +
+          '<select class="form-control" id="cl-aktif">' +
+            '<option value="true" '  + (item.aktif  ? 'selected' : '') + '>Aktif</option>' +
+            '<option value="false" ' + (!item.aktif ? 'selected' : '') + '>Nonaktif</option>' +
+          '</select></div>'
+        : ''),
+    footer:
+      '<button class="btn btn-outline" onclick="closeModal(\'cl-modal\')">Batal</button>' +
+      '<button class="btn btn-primary" id="cl-save-btn" onclick="singleClick(this,function(){ saveChecklistItem(\'' + (item ? item.item_id : '') + '\') })">' +
+        (isEdit ? 'Simpan' : 'Tambah') +
+      '</button>',
+  });
+  lucide.createIcons();
+  setTimeout(toggleKategoriField, 50);
+}
+
+function toggleKategoriField() {
+  var isKhusus = document.getElementById('cl-tipe') && document.getElementById('cl-tipe').value === 'KHUSUS';
+  var grp = document.getElementById('cl-kat-group');
+  if (!grp) return;
+  grp.style.cssText = isKhusus ? 'opacity:1;pointer-events:all' : 'opacity:.4;pointer-events:none';
+}
+
+async function saveChecklistItem(itemId) {
+  var btn     = document.getElementById('cl-save-btn');
+  var restore = btnLoading(btn, itemId ? 'Menyimpan...' : 'Menambahkan...', 'cl-modal');
+  var tipe    = document.getElementById('cl-tipe') ? document.getElementById('cl-tipe').value : '';
+  var data = {
+    tipe:               tipe,
+    kategori:           tipe === 'KHUSUS' ? (document.getElementById('cl-kategori') ? document.getElementById('cl-kategori').value : '') : '',
+    nomor:              Number(document.getElementById('cl-nomor')        ? document.getElementById('cl-nomor').value         : 0),
+    aspek:              document.getElementById('cl-aspek')               ? document.getElementById('cl-aspek').value         : '',
+    persyaratan:        document.getElementById('cl-persyaratan')         ? document.getElementById('cl-persyaratan').value.trim() : '',
+    check_item:         document.getElementById('cl-item')                ? document.getElementById('cl-item').value.trim()       : '',
+    standar_check_item: document.getElementById('cl-standar') ? document.getElementById('cl-standar').value.trim() : '',
+    labels:             document.getElementById('cl-labels')  ? document.getElementById('cl-labels').value.trim()  : '',
+  };
+  if (!data.persyaratan || !data.check_item || !data.nomor) { restore(); return toast('Nomor, persyaratan, dan check item wajib diisi.', 'error'); }
+  try {
+    if (itemId) {
+      var aktif = document.getElementById('cl-aktif') ? document.getElementById('cl-aktif').value === 'true' : true;
+      await api('UPDATE_CHECKLIST_ITEM', { item_id: itemId, updates: Object.assign({}, data, { aktif: aktif }) });
+    } else {
+      await api('CREATE_CHECKLIST_ITEM', data);
+    }
+    clearCache('GET_CHECKLIST_MASTER');
+    clearCache('GET_CHECKLIST_GENERAL');
+    clearCache('GET_CHECKLIST_KHUSUS');
+    toast('Berhasil disimpan.', 'success');
+    closeModal('cl-modal');
+    loadAdminChecklist(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function refreshChecklistCache(btn) {
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+  try {
+    clearCache('GET_CHECKLIST_MASTER');
+    clearCache('GET_CHECKLIST_GENERAL');
+    clearCache('GET_CHECKLIST_KHUSUS');
+    toast('Cache berhasil di-refresh.', 'success');
+    loadAdminChecklist(document.getElementById('admin-tab-content'));
+    restore();
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+// ── BULK IMPORT CHECKLIST ─────────────────────────────────────
+
+function openBulkChecklistModal() {
+  var kategoriList = ['Laboratorium','Office','Maintenance','Produksi','Gudang'];
+  createModal({
+    id:   'bulk-cl-modal',
+    title: 'Import Banyak Checklist Item',
+    size: 'modal-lg',
+    body:
+      '<div class="form-row" style="margin-bottom:14px">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Tipe <span class="required">*</span></label>' +
+          '<select class="form-control" id="bcl-tipe" onchange="toggleBulkKategori()">' +
+            '<option value="GENERAL">General</option>' +
+            '<option value="KHUSUS">Khusus</option>' +
+          '</select>' +
+        '</div>' +
+        '<div class="form-group" id="bcl-kat-group" style="opacity:.4;pointer-events:none">' +
+          '<label class="form-label">Kategori</label>' +
+          '<select class="form-control" id="bcl-kategori">' +
+            kategoriList.map(function(k) { return '<option>' + k + '</option>'; }).join('') +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12px;margin-bottom:12px;align-items:start">' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Urutan kolom</span>' +
+        '<span style="font-family:monospace;font-size:12px">' +
+          'Aspek &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Persyaratan &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Check Item &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Standar Check Item &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Labels (opsional)' +
+        '</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Aspek valid</span>' +
+        '<span style="font-size:12px">Plan &nbsp;·&nbsp; Do &nbsp;·&nbsp; Check &nbsp;·&nbsp; Action</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Nomor</span>' +
+        '<span style="font-size:12px">Di-generate otomatis, lanjutan dari data existing tipe+kategori yang sama.</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Format</span>' +
+        '<span style="font-size:12px">Paste dari Excel (tab) atau ketik manual (koma).</span>' +
+      '</div>' +
+      '<textarea class="form-control" id="bcl-input" rows="12" ' +
+        'placeholder="Plan\tTindakan untuk mengatasi Risiko dan Peluang (Risk Assessment)\tRisk Assessment (RA)\tSampling min. 2 risiko per kategori&#10;Plan\tTindakan untuk mengatasi Risiko dan Peluang (Risk Assessment)\tContoh Risk Control\tSampling min. 5 task&#10;..." ' +
+        'style="font-family:monospace;font-size:12px;resize:vertical"></textarea>' +
+      '<div id="bcl-preview" style="margin-top:12px"></div>',
+    footer:
+      '<span id="bcl-count" style="font-size:12px;color:var(--text-muted);margin-right:auto"></span>' +
+      '<button class="btn btn-outline" onclick="closeModal(\'bulk-cl-modal\')">Batal</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="previewBulkChecklist()">Preview</button>' +
+      '<button class="btn btn-primary" id="bcl-save-btn" onclick="singleClick(this,function(){ saveBulkChecklist() })">Import Semua</button>',
+  });
+  lucide.createIcons();
+
+  var ta = document.getElementById('bcl-input');
+  if (ta) ta.addEventListener('input', function() {
+    var lines = ta.value.split('\n').filter(function(l) { return l.trim(); }).length;
+    var el = document.getElementById('bcl-count');
+    if (el) el.textContent = lines + ' item akan ditambahkan';
+  });
+}
+
+function toggleBulkKategori() {
+  var isKhusus = document.getElementById('bcl-tipe') && document.getElementById('bcl-tipe').value === 'KHUSUS';
+  var grp = document.getElementById('bcl-kat-group');
+  if (grp) grp.style.cssText = isKhusus ? 'opacity:1;pointer-events:all' : 'opacity:.4;pointer-events:none';
+}
+
+function _parseBulkChecklistLines() {
+  var ta = document.getElementById('bcl-input');
+  if (!ta) return [];
+
+  var raw  = ta.value;
+  var rows = [];
+  var i    = 0;
+
+  while (i < raw.length) {
+    var cols = [];
+    while (i < raw.length) {
+      if (raw[i] === '"') {
+        i++;
+        var val = '';
+        while (i < raw.length) {
+          if (raw[i] === '"' && raw[i+1] === '"') { val += '"'; i += 2; }
+          else if (raw[i] === '"') { i++; break; }
+          else { val += raw[i++]; }
+        }
+        cols.push(val.trim());
+      } else {
+        var val = '';
+        while (i < raw.length && raw[i] !== '\t' && raw[i] !== '\n' && raw[i] !== '\r') {
+          val += raw[i++];
+        }
+        cols.push(val.trim());
+      }
+      if (i < raw.length && raw[i] === '\t') { i++; continue; }
+      if (i < raw.length && (raw[i] === '\n' || raw[i] === '\r')) {
+        if (raw[i] === '\r' && raw[i+1] === '\n') i++;
+        i++;
+      }
+      break;
+    }
+
+    if (cols.length === 0 || cols.every(function(c) { return !c; })) continue;
+
+    var aspekRaw = (cols[0] || '').trim();
+    rows.push({
+      aspek:              aspekRaw.charAt(0).toUpperCase() + aspekRaw.slice(1).toLowerCase(),
+      persyaratan:        (cols[1] || '').replace(/\n/g, ' ').trim(),
+      check_item:         (cols[2] || '').trim(),
+      standar_check_item: (cols[3] || '').trim(),
+      labels:             (cols[4] || '').trim(),
+    });
+  }
+
+  return rows.filter(function(r) { return r.aspek || r.persyaratan || r.check_item; });
+}
+
+function previewBulkChecklist() {
+  var items   = _parseBulkChecklistLines();
+  var preview = document.getElementById('bcl-preview');
+  if (!preview) return;
+  if (!items.length) { preview.innerHTML = ''; return; }
+  var validAspek = ['Plan','Do','Check','Action'];
+  var lastPersyaratan = null;
+  var rows = items.map(function(t, i) {
+    var warn = '';
+    if (!t.aspek || !t.persyaratan || !t.check_item) warn = '⚠ aspek/persyaratan/check item kosong';
+    else if (!validAspek.includes(t.aspek)) warn = '⚠ aspek tidak valid: ' + t.aspek;
+    var isNew = t.persyaratan !== lastPersyaratan;
+    lastPersyaratan = t.persyaratan;
+    return '<tr style="font-size:12px' + (warn ? ';color:var(--rose)' : '') + (isNew && i > 0 ? ';border-top:2px solid var(--border)' : '') + '">' +
+      '<td style="padding:4px 8px;color:var(--text-muted)">' + (i+1) + '</td>' +
+      '<td style="padding:4px 8px">' + escHtml(t.aspek) + '</td>' +
+      '<td style="padding:4px 8px;max-width:160px">' + (isNew ? '<strong>' + escHtml(t.persyaratan) + '</strong>' : '<span style="color:var(--text-muted)">↳</span>') + '</td>' +
+      '<td style="padding:4px 8px;max-width:160px">' + escHtml(t.check_item) + '</td>' +
+      '<td style="padding:4px 8px;font-size:11px;color:var(--text-muted);max-width:140px">' + escHtml(t.standar_check_item || '—') + '</td>' +
+      '<td style="padding:4px 8px;max-width:120px">' + (t.labels
+        ? t.labels.split(',').map(function(l) {
+            return '<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:var(--bg);border:1px solid var(--border);display:inline-block;margin:1px">' + escHtml(l.trim()) + '</span>';
+          }).join('')
+        : '<span style="color:var(--text-muted);font-size:11px">—</span>') + '</td>' +
+      '<td style="padding:4px 8px;color:var(--rose);font-size:11px">' + warn + '</td>' +
+    '</tr>';
+  }).join('');
+  preview.innerHTML =
+    '<div style="font-size:12px;font-weight:600;margin-bottom:6px">' + items.length + ' item akan diproses:</div>' +
+    '<div style="overflow-x:auto;max-height:260px;overflow-y:auto">' +
+      '<table style="width:100%;border-collapse:collapse">' +
+        '<thead><tr style="font-size:11px;color:var(--text-muted);background:var(--bg)">' +
+          '<th style="padding:4px 8px">#</th>' +
+          '<th style="padding:4px 8px">Aspek</th>' +
+          '<th style="padding:4px 8px">Persyaratan</th>' +
+          '<th style="padding:4px 8px">Check Item</th>' +
+          '<th style="padding:4px 8px">Standar</th>' +
+          '<th style="padding:4px 8px">Labels</th>' +
+          '<th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
+}
+
+async function saveBulkChecklist() {
+  var items = _parseBulkChecklistLines();
+  if (!items.length) return toast('Tidak ada data untuk diimport.', 'error');
+  var tipe     = document.getElementById('bcl-tipe')     ? document.getElementById('bcl-tipe').value     : 'GENERAL';
+  var kategori = document.getElementById('bcl-kategori') ? document.getElementById('bcl-kategori').value : '';
+  if (tipe === 'KHUSUS' && !kategori) return toast('Pilih kategori untuk tipe Khusus.', 'error');
+  var btn     = document.getElementById('bcl-save-btn');
+  var restore = btnLoading(btn, 'Mengimport...', 'bulk-cl-modal');
+  try {
+    var result = await api('BATCH_CREATE_CHECKLIST_ITEMS', { tipe: tipe, kategori: tipe === 'KHUSUS' ? kategori : '', items: items });
+    clearCache('GET_CHECKLIST_MASTER');
+    clearCache('GET_CHECKLIST_GENERAL');
+    clearCache('GET_CHECKLIST_KHUSUS');
+    var msg = result.created + ' item berhasil ditambahkan.';
+    if (result.skipped && result.skipped.length) {
+      msg += ' ' + result.skipped.length + ' gagal: ' + result.skipped.map(function(s) { return s.check_item + ' (' + s.reason + ')'; }).join(', ');
+    }
+    toast(msg, result.created > 0 ? 'success' : 'error');
+    closeModal('bulk-cl-modal');
+    loadAdminChecklist(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+function _attachClCheckboxListeners() {
+  document.querySelectorAll('.cl-chk').forEach(function(chk) {
+    chk.addEventListener('change', _updateClDeleteBtn);
+  });
+}
+
+function toggleClDeleteMode() {
+  var active = document.getElementById('cl-chk-col') && document.getElementById('cl-chk-col').style.display === 'none';
+  if (!document.getElementById('cl-chk-col')) return;
+  document.getElementById('cl-chk-col').style.display = active ? '' : 'none';
+  document.querySelectorAll('.cl-chk-cell').forEach(function(td) { td.style.display = active ? '' : 'none'; });
+  var btn = document.getElementById('cl-aksi-btn');
+  if (btn) btn.style.color = active ? 'var(--rose)' : '';
+  if (!active) {
+    document.querySelectorAll('.cl-chk').forEach(function(c) { c.checked = false; });
+    var all = document.getElementById('cl-chk-all');
+    if (all) { all.checked = false; all.indeterminate = false; }
+    _updateClDeleteBtn();
+  }
+}
+
+function toggleAllClCheckboxes(masterChk) {
+  document.querySelectorAll('.cl-chk').forEach(function(chk) { chk.checked = masterChk.checked; });
+  _updateClDeleteBtn();
+}
+
+function _updateClDeleteBtn() {
+  var checked = document.querySelectorAll('.cl-chk:checked').length;
+  var btn     = document.getElementById('cl-delete-selected-btn');
+  var count   = document.getElementById('cl-selected-count');
+  if (btn)   btn.style.display = checked > 0 ? '' : 'none';
+  if (count) count.textContent = checked;
+  var all = document.getElementById('cl-chk-all');
+  if (all) all.indeterminate = checked > 0 && checked < document.querySelectorAll('.cl-chk').length;
+}
+
+async function batchDeleteSelectedCl() {
+  var itemIds = Array.from(document.querySelectorAll('.cl-chk:checked')).map(function(c) { return c.value; });
+  if (!itemIds.length) return;
+  var ok = await showConfirm({
+    title: 'Hapus ' + itemIds.length + ' Item',
+    message: 'Hapus ' + itemIds.length + ' checklist item sekaligus?',
+    detail: 'Item yang sudah ter-assign ke agenda tidak akan terhapus dari agenda tersebut.',
+    confirmText: 'Hapus Semua',
+    danger: true,
+  });
+  if (!ok) return;
+  var btn     = document.getElementById('cl-delete-selected-btn');
+  var restore = btnLoading(btn, 'Menghapus...', 'admin-tab-content');
+  try {
+    var result = await api('BATCH_DELETE_CHECKLIST_ITEMS', { item_ids: itemIds });
+    clearCache('GET_CHECKLIST_MASTER');
+    clearCache('GET_CHECKLIST_GENERAL');
+    clearCache('GET_CHECKLIST_KHUSUS');
+    var msg = result.deleted + ' item berhasil dihapus.';
+    if (result.skipped && result.skipped.length) msg += ' ' + result.skipped.length + ' gagal.';
+    toast(msg, result.deleted > 0 ? 'success' : 'error');
+    loadAdminChecklist(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+// ── PERIODS & AGENDA ──────────────────────────────────────────
+async function loadAdminPeriods(container) {
+  var periods = await api('GET_PERIODS');
+  window._periods = periods;
+
+  var rows = periods.length === 0
+    ? '<div class="empty-state" style="padding:40px"><div class="empty-desc">Belum ada periode.</div></div>'
+    : periods.slice().reverse().map(function(p, idx) {
+        var canProcess = p.status === 'PLANNED' || p.status === 'COMPLETED';
+        return '<div class="period-item" id="period-item-' + escHtml(p.period_id) + '" style="border-bottom:1px solid var(--border)">' +
+          '<div style="display:flex;align-items:center;gap:12px;padding:14px 20px;cursor:pointer" onclick="_togglePeriodExpand(\'' + escHtml(p.period_id) + '\',\'' + escHtml(p.nama_periode) + '\')">' +
+            '<div class="period-chk-cell" style="display:none;flex-shrink:0" onclick="event.stopPropagation()">' +
+              (canProcess
+                ? '<input type="checkbox" class="period-chk" value="' + escHtml(p.period_id) + '" ' +
+                  'data-status="' + escHtml(p.status) + '" data-completed-at="' + escHtml(p.completed_at || '') + '" data-nama="' + escHtml(p.nama_periode) + '" ' +
+                  'style="width:14px;height:14px;accent-color:var(--rose)" onchange="_updatePeriodActionBtns()">'
+                : '<div style="width:14px"></div>') +
+            '</div>' +
+            '<div style="width:28px;flex-shrink:0;font-size:12px;color:var(--text-muted);text-align:center">' + (idx + 1) + '</div>' +
+            '<div id="chevron-' + escHtml(p.period_id) + '" style="flex-shrink:0;color:var(--text-muted);transition:transform .2s;display:flex">' +
+              '<i data-lucide="chevron-right" style="width:15px;height:15px"></i>' +
+            '</div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-weight:600;font-size:14px">' + escHtml(p.nama_periode) + '</div>' +
+              '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">' +
+                formatDate(p.tanggal_mulai) + ' — ' + formatDate(p.tanggal_selesai) +
+              '</div>' +
+            '</div>' +
+            '<div style="flex-shrink:0">' + statusBadge(p.status) + '</div>' +
+            '<div style="flex-shrink:0;display:flex;gap:6px" onclick="event.stopPropagation()">' +
+              (p.status === 'PLANNED'
+                ? '<button class="btn btn-success btn-sm" onclick="singleClick(this,function(btn){ setPeriodStatus(\'' + escHtml(p.period_id) + '\',\'ACTIVE\', btn) })">' +
+                    '<i data-lucide="play" style="width:12px;height:12px"></i> Aktifkan' +
+                  '</button>'
+                : '') +
+              (p.status === 'ACTIVE'
+                ? '<button class="btn btn-outline btn-sm" onclick="singleClick(this,function(btn){ setPeriodStatus(\'' + escHtml(p.period_id) + '\',\'COMPLETED\', btn) })">' +
+                    '<i data-lucide="check-circle" style="width:12px;height:12px"></i> Selesai' +
+                  '</button>'
+                : '') +
+            '</div>' +
+          '</div>' +
+          '<div id="agenda-row-' + escHtml(p.period_id) + '" style="display:none;border-top:1px solid var(--border);background:var(--bg)">' +
+            '<div id="agenda-content-' + escHtml(p.period_id) + '" style="padding:16px 24px 20px"></div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+  container.innerHTML =
+    '<div class="card">' +
+      '<div class="card-header">' +
+        '<div>' +
+          '<div class="card-title">Periode Audit</div>' +
+          '<div class="card-subtitle">' + periods.length + ' periode</div>' +
+        '</div>' +
+        '<div class="flex gap-8">' +
+          '<button class="btn btn-danger btn-sm" id="period-delete-btn" style="display:none" onclick="singleClick(this,function(){ openPeriodDeletePreview() })">' +
+            '<i data-lucide="trash-2" style="width:14px;height:14px"></i> Hapus (<span id="period-selected-count">0</span>)' +
+          '</button>' +
+          '<button class="btn btn-outline btn-sm" id="period-archive-btn" style="display:none" onclick="singleClick(this,function(){ batchArchivePeriods() })">' +
+            '<i data-lucide="archive" style="width:14px;height:14px"></i> Arsip (<span id="period-selected-count2">0</span>)' +
+          '</button>' +
+          '<div style="position:relative;display:inline-block">' +
+            '<button class="btn btn-outline btn-sm" id="period-aksi-btn" onclick="_togglePeriodEditMenu()" style="display:flex;align-items:center;gap:6px">' +
+              '<i data-lucide="settings-2" style="width:13px;height:13px"></i> Edit' +
+              '<i data-lucide="chevron-down" style="width:12px;height:12px"></i>' +
+            '</button>' +
+            '<div id="period-edit-menu" style="display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:180px;z-index:100;overflow:hidden">' +
+              '<div style="padding:6px 0">' +
+                '<button class="btn btn-ghost" onclick="_togglePeriodEditMenu();togglePeriodDeleteMode()" style="width:100%;justify-content:flex-start;padding:8px 14px;border-radius:0;font-size:13px;gap:8px">' +
+                  '<i data-lucide="check-square" style="width:13px;height:13px"></i> Pilih & Hapus / Arsip' +
+                '</button>' +
+                '<button class="btn btn-ghost" onclick="_togglePeriodEditMenu();toggleArchivedPeriods()" style="width:100%;justify-content:flex-start;padding:8px 14px;border-radius:0;font-size:13px;gap:8px">' +
+                  '<i data-lucide="archive" style="width:13px;height:13px"></i> Lihat Arsip' +
+                '</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<button class="btn btn-primary btn-sm" onclick="singleClick(this,function(){ openPeriodModal() })">' +
+            '<i data-lucide="plus" style="width:14px;height:14px"></i> Periode Baru' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div id="period-list">' + rows + '</div>' +
+      '<div id="archived-panel"></div>' +
+    '</div>';
+
+  lucide.createIcons();
+}
+
+async function savePeriod() {
+  var btn     = document.getElementById('pm-save-btn');
+  var restore = btnLoading(btn, 'Membuat periode...', 'period-modal');
+  var nama    = document.getElementById('pm-nama')    ? document.getElementById('pm-nama').value.trim()    : '';
+  var mulai   = document.getElementById('pm-mulai')   ? document.getElementById('pm-mulai').value           : '';
+  var selesai = document.getElementById('pm-selesai') ? document.getElementById('pm-selesai').value          : '';
+  if (!nama || !mulai || !selesai) { restore(); return toast('Semua field wajib diisi.', 'error'); }
+  try {
+    await api('CREATE_PERIOD', { nama_periode: nama, tanggal_mulai: mulai, tanggal_selesai: selesai });
+    clearCache('GET_PERIODS');
+    toast('Periode "' + nama + '" berhasil dibuat.', 'success');
+    closeModal('period-modal');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+function openPeriodModal() {
+  createModal({
+    id: 'period-modal',
+    title: 'Buat Periode Baru',
+    body:
+      '<div class="form-group">' +
+        '<label class="form-label">Nama Periode <span class="required">*</span></label>' +
+        '<input class="form-control" id="pm-nama" placeholder="e.g. Audit Internal Q1 2026">' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Tanggal Mulai <span class="required">*</span></label>' +
+          '<input class="form-control" type="date" id="pm-mulai">' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label class="form-label">Tanggal Selesai <span class="required">*</span></label>' +
+          '<input class="form-control" type="date" id="pm-selesai">' +
+        '</div>' +
+      '</div>',
+    footer:
+      '<button class="btn btn-outline" onclick="closeModal(\'period-modal\')">Batal</button>' +
+      '<button class="btn btn-primary" id="pm-save-btn" onclick="singleClick(this,function(){ savePeriod() })">Buat Periode</button>',
+  });
+  lucide.createIcons();
+}
+
+async function setPeriodStatus(periodId, status, btn) {
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+  if (status === 'COMPLETED') {
+    try {
+      var check = await api('UPDATE_PERIOD_STATUS', { period_id: periodId, status: status, force: false });
+      if (check && check.requireConfirm) {
+        var ok = await showConfirm({
+          title: 'Tutup Periode',
+          message: 'Ada ' + check.openCount + ' temuan belum closed.',
+          detail: 'Jika dilanjutkan, temuan tersebut akan otomatis ditandai OVERDUE.',
+          confirmText: 'Tutup & Tandai Overdue',
+          danger: true,
+        });
+        if (!ok) { restore(); return; }
+        await api('UPDATE_PERIOD_STATUS', { period_id: periodId, status: status, force: true });
+        clearCache('GET_PERIODS');
+        clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+        clearCache('GET_DASHBOARD');
+        toast('Periode ditutup. ' + check.openCount + ' temuan ditandai Overdue.', 'success');
+      } else {
+        clearCache('GET_PERIODS');
+        clearCache('GET_DASHBOARD');
+        toast('Periode berhasil diselesaikan.', 'success');
+      }
+      // Periode yang baru di-complete tidak lagi aktif
+      if (App.activePeriod && App.activePeriod.period_id === periodId) {
+        App.activePeriod = null;
+        renderSidebar();
+      }
+      adminTab('periods', document.querySelector('.tab-btn.active'));
+    } catch(err) { toast(err.message, 'error'); restore(); }
+    return;
+  }
+  var ok = await showConfirm({
+    title: 'Aktifkan Periode',
+    message: 'Aktifkan periode ini?',
+    detail: 'Status akan berubah menjadi ACTIVE dan audit dapat dimulai.',
+    confirmText: 'Aktifkan',
+  });
+  if (!ok) { restore(); return; }
+  try {
+    await api('UPDATE_PERIOD_STATUS', { period_id: periodId, status: status });
+    clearCache('GET_PERIODS');
+    clearCache('GET_DASHBOARD');
+    // Set periode yang baru diaktifkan sebagai periode aktif di memori
+    var periods = await api('GET_PERIODS');
+    App.activePeriod = periods.find(function(p) { return p.period_id === periodId; }) || null;
+    renderSidebar();
+    toast('Status periode diperbarui.', 'success');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function deletePeriodUI(periodId, nama, status, completedAt, btn) {
+  // completedAt opsional (hanya untuk COMPLETED)
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+
+  if (status === 'COMPLETED') {
+    // Cek apakah sudah 3 tahun
+    var year = completedAt ? new Date(completedAt).getFullYear() : null;
+    var earliest = year ? new Date(year + 4, 0, 1) : null;
+    if (earliest && new Date() < earliest) {
+      restore();
+      return toast('Baru bisa dihapus mulai 1 Januari ' + (year + 4) + '.', 'error');
+    }
+  }
+
+  var ok = await showConfirm({
+    title: 'Hapus Periode',
+    message: 'Hapus "' + nama + '" secara permanen?',
+    detail: status === 'COMPLETED'
+      ? 'Semua data audit, temuan, dan file Drive akan dihapus. Tindakan ini tidak dapat dibatalkan.'
+      : 'Entry periode dan file audit akan dihapus permanen.',
+    confirmText: 'Hapus Permanen',
+    danger: true,
+  });
+  if (!ok) { restore(); return; }
+
+  try {
+    await api('DELETE_PERIOD', { period_id: periodId });
+    clearCache('GET_PERIODS');
+    clearCache('GET_DASHBOARD');
+    toast('Periode "' + nama + '" berhasil dihapus.', 'success');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function archivePeriodUI(periodId, nama, btn) {
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+  var ok = await showConfirm({
+    title: 'Arsipkan Periode',
+    message: 'Arsipkan "' + nama + '"?',
+    detail: 'Periode tidak akan muncul di daftar utama. File Drive tetap ada. Bisa di-restore kapan saja.',
+    confirmText: 'Arsipkan',
+  });
+  if (!ok) { restore(); return; }
+  try {
+    await api('ARCHIVE_PERIOD', { period_id: periodId });
+    clearCache('GET_PERIODS');
+    toast('Periode "' + nama + '" diarsipkan.', 'success');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function toggleArchivedPeriods() {
+  var btn = document.getElementById('btn-show-archived');
+  var showing = btn && btn.dataset.showing === 'true';
+
+  if (showing) {
+    btn.dataset.showing = 'false';
+    btn.innerHTML = '<i data-lucide="archive" style="width:14px;height:14px"></i> Arsip';
+    lucide.createIcons();
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+    return;
+  }
+
+  try {
+    var archived = await api('GET_ARCHIVED_PERIODS', {});
+    if (!archived.length) return toast('Tidak ada periode yang diarsipkan.', 'info');
+
+    btn.dataset.showing = 'true';
+    btn.innerHTML = '<i data-lucide="x" style="width:14px;height:14px"></i> Tutup Arsip';
+    lucide.createIcons();
+
+    // Tampilkan sebagai panel di bawah tabel utama
+    var panel = document.getElementById('archived-panel');
+    if (!panel) return;
+
+    var rows = archived.map(function(p) {
+      return '<tr>' +
+        '<td class="td-mono">' + escHtml(p.period_id) + '</td>' +
+        '<td><strong>' + escHtml(p.nama_periode) + '</strong></td>' +
+        '<td class="text-sm">' + formatDate(p.tanggal_mulai) + '</td>' +
+        '<td class="text-sm">' + formatDate(p.tanggal_selesai) + '</td>' +
+        '<td class="text-sm text-muted">' + formatDate(p.archived_at) + '</td>' +
+        '<td><button class="btn btn-outline btn-sm" onclick="singleClick(this,function(btn){ restorePeriodUI(\'' + p.period_id + '\',\'' + escHtml(p.nama_periode) + '\', btn) })">' +
+          '<i data-lucide="rotate-ccw" style="width:13px;height:13px"></i> Restore' +
+        '</button></td>' +
+      '</tr>';
+    }).join('');
+
+    panel.innerHTML =
+      '<div class="card" style="border:2px dashed var(--border)">' +
+        '<div class="card-header">' +
+          '<div><div class="card-title" style="display:flex;align-items:center;gap:8px">' +
+            '<i data-lucide="archive" style="width:16px;height:16px"></i> Periode Diarsipkan' +
+          '</div></div>' +
+        '</div>' +
+        '<div class="table-wrap"><table>' +
+          '<thead><tr><th>ID</th><th>Nama</th><th>Mulai</th><th>Selesai</th><th>Diarsipkan</th><th>Aksi</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+        '</table></div>' +
+      '</div>';
+    lucide.createIcons();
+  } catch(err) { toast(err.message, 'error'); }
+}
+
+async function restorePeriodUI(periodId, nama, btn) {
+  var restore = btn ? btnLoading(btn, '', 'admin-tab-content') : function(){};
+  try {
+    await api('RESTORE_PERIOD', { period_id: periodId });
+    clearCache('GET_PERIODS');
+    toast('Periode "' + nama + '" berhasil di-restore.', 'success');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+// ── Period checkbox helpers ───────────────────────────────────
+
+function togglePeriodDeleteMode() {
+  var chkCells = document.querySelectorAll('.period-chk-cell');
+  var active   = chkCells.length > 0 && chkCells[0].style.display === 'none';
+  chkCells.forEach(function(el) { el.style.display = active ? 'flex' : 'none'; });
+  var btn = document.getElementById('period-aksi-btn');
+  if (btn) btn.style.color = active ? 'var(--rose)' : '';
+  if (!active) {
+    document.querySelectorAll('.period-chk').forEach(function(c) { c.checked = false; });
+    var all = document.getElementById('period-chk-all');
+    if (all) { all.checked = false; all.indeterminate = false; }
+    _updatePeriodActionBtns();
+  }
+}
+
+function _togglePeriodEditMenu() {
+  var menu = document.getElementById('period-edit-menu');
+  if (!menu) return;
+  var isOpen = menu.style.display !== 'none';
+  menu.style.display = isOpen ? 'none' : '';
+  if (!isOpen) {
+    // Tutup kalau klik di luar
+    setTimeout(function() {
+      document.addEventListener('click', function _close(e) {
+        if (!menu.contains(e.target) && e.target.id !== 'period-aksi-btn') {
+          menu.style.display = 'none';
+        }
+        document.removeEventListener('click', _close);
+      });
+    }, 10);
+  }
+}
+
+function toggleAllPeriodCheckboxes(masterChk) {
+  document.querySelectorAll('.period-chk').forEach(function(chk) { chk.checked = masterChk.checked; });
+  _updatePeriodActionBtns();
+}
+
+function _updatePeriodActionBtns() {
+  var checked = document.querySelectorAll('.period-chk:checked').length;
+  var delBtn  = document.getElementById('period-delete-btn');
+  var arcBtn  = document.getElementById('period-archive-btn');
+  var cnt1    = document.getElementById('period-selected-count');
+  var cnt2    = document.getElementById('period-selected-count2');
+  var display = checked > 0 ? '' : 'none';
+  if (delBtn) delBtn.style.display = display;
+  if (arcBtn) arcBtn.style.display = display;
+  if (cnt1)   cnt1.textContent = checked;
+  if (cnt2)   cnt2.textContent = checked;
+  var all = document.getElementById('period-chk-all');
+  if (all) all.indeterminate = checked > 0 && checked < document.querySelectorAll('.period-chk').length;
+}
+
+async function batchArchivePeriods() {
+  var items = Array.from(document.querySelectorAll('.period-chk:checked')).map(function(c) {
+    return { period_id: c.value, nama: c.dataset.nama };
+  });
+  if (!items.length) return;
+  var ok = await showConfirm({
+    title: 'Arsipkan ' + items.length + ' Periode',
+    message: 'Arsipkan periode berikut?',
+    detail: items.map(function(i) { return '· ' + i.nama; }).join('\n') +
+      '\n\nFile Drive tetap ada. Bisa di-restore kapan saja.',
+    confirmText: 'Arsipkan',
+  });
+  if (!ok) return;
+  var btn     = document.getElementById('period-archive-btn');
+  var restore = btnLoading(btn, 'Mengarsipkan...', 'admin-tab-content');
+  try {
+    for (var i = 0; i < items.length; i++) {
+      await api('ARCHIVE_PERIOD', { period_id: items[i].period_id });
+    }
+    clearCache('GET_PERIODS');
+    toast(items.length + ' periode berhasil diarsipkan.', 'success');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+function openPeriodDeletePreview() {
+  var items = Array.from(document.querySelectorAll('.period-chk:checked')).map(function(c) {
+    return {
+      period_id:    c.value,
+      nama:         c.dataset.nama,
+      status:       c.dataset.status,
+      completed_at: c.dataset.completedAt || '',
+    };
+  });
+  if (!items.length) return;
+
+  // Cek mana yang valid untuk dihapus
+  var now = new Date();
+  items.forEach(function(item) {
+    if (item.status === 'COMPLETED' && item.completed_at) {
+      var year     = new Date(item.completed_at).getFullYear();
+      var earliest = new Date(year + 4, 0, 1);
+      item.canDelete  = now >= earliest;
+      item.deleteFrom = 'Baru bisa dihapus mulai 1 Jan ' + (year + 4);
+    } else {
+      item.canDelete  = true;
+      item.deleteFrom = '';
+    }
+  });
+
+  var rows = items.map(function(item, i) {
+    return '<tr id="del-preview-row-' + i + '" data-period-id="' + escHtml(item.period_id) + '">' +
+      '<td style="padding:8px 12px">' +
+        '<strong>' + escHtml(item.nama) + '</strong>' +
+        '<div style="font-size:11px;color:var(--text-muted)">' + escHtml(item.status) + '</div>' +
+      '</td>' +
+      '<td style="padding:8px 12px">' +
+        (item.canDelete
+          ? '<span class="badge badge-emerald">Bisa dihapus</span>'
+          : '<span class="badge badge-amber">' + escHtml(item.deleteFrom) + '</span>') +
+      '</td>' +
+      '<td style="padding:8px 12px;text-align:center">' +
+        (!item.canDelete
+          ? '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'tr\').remove();_updateDeletePreviewCount()" title="Hapus dari list">' +
+              '<i data-lucide="x" style="width:13px;height:13px;color:var(--rose)"></i>' +
+            '</button>'
+          : '') +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  createModal({
+    id: 'period-delete-preview-modal',
+    title: 'Preview Hapus Periode',
+    body:
+      '<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">' +
+        'Periode di bawah akan dihapus permanen beserta semua data dan file Drive-nya. ' +
+        'Yang belum memenuhi syarat bisa dihapus dari list.' +
+      '</p>' +
+      '<table style="width:100%;border-collapse:collapse" id="del-preview-table">' +
+        '<thead><tr style="font-size:11px;color:var(--text-muted);background:var(--bg)">' +
+          '<th style="padding:8px 12px">Periode</th>' +
+          '<th style="padding:8px 12px">Status Hapus</th>' +
+          '<th style="width:40px"></th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-top:10px" id="del-preview-info">' +
+        items.filter(function(i) { return i.canDelete; }).length + ' dari ' + items.length + ' periode bisa dihapus.' +
+      '</div>',
+    footer:
+      '<button class="btn btn-outline" onclick="closeModal(\'period-delete-preview-modal\')">Batal</button>' +
+      '<button class="btn btn-danger" id="del-confirm-btn" onclick="singleClick(this,function(btn){ confirmBatchDeletePeriods(btn) })">' +
+        '<i data-lucide="trash-2" style="width:14px;height:14px"></i> Hapus Semua yang Valid' +
+      '</button>',
+  });
+  lucide.createIcons();
+}
+
+function _updateDeletePreviewCount() {
+  var remaining = document.querySelectorAll('#del-preview-table tbody tr').length;
+  var info = document.getElementById('del-preview-info');
+  if (info) info.textContent = remaining + ' periode akan dihapus.';
+}
+
+async function confirmBatchDeletePeriods(btn) {
+  var rows = document.querySelectorAll('#del-preview-table tbody tr');
+  var periodIds = [];
+  rows.forEach(function(row) {
+    var pid = row.dataset.periodId;
+    if (pid) periodIds.push(pid);
+  });
+  if (!periodIds.length) { closeModal('period-delete-preview-modal'); return; }
+
+  var restore = btnLoading(btn, 'Menghapus...', 'period-delete-preview-modal');
+  try {
+    for (var i = 0; i < periodIds.length; i++) {
+      await api('DELETE_PERIOD', { period_id: periodIds[i] });
+    }
+    clearCache('GET_PERIODS');
+    clearCache('GET_DASHBOARD');
+    toast(periodIds.length + ' periode berhasil dihapus.', 'success');
+    closeModal('period-delete-preview-modal');
+    adminTab('periods', document.querySelector('.tab-btn.active'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function _togglePeriodExpand(periodId, namaPeriode) {
+  var expandRow = document.getElementById('agenda-row-' + periodId);
+  if (!expandRow) return;
+  var isOpen = expandRow.style.display !== 'none';
+
+  document.querySelectorAll('[id^="agenda-row-"]').forEach(function(r) { r.style.display = 'none'; });
+  document.querySelectorAll('[id^="chevron-"]').forEach(function(c) { c.style.transform = ''; });
+
+  if (isOpen) return;
+
+  expandRow.style.display = '';
+  var chevron = document.getElementById('chevron-' + periodId);
+  if (chevron) chevron.style.transform = 'rotate(90deg)';
+
+  var contentDiv = document.getElementById('agenda-content-' + periodId);
+  contentDiv.innerHTML = '<div class="page-loader"><div class="spinner dark"></div></div>';
+  lucide.createIcons();
+
+  try {
+    var results = await Promise.all([
+      api('GET_AGENDAS_BY_PERIOD', { period_id: periodId }),
+      cachedApi('GET_AREAS', {}, 300),
+      cachedApi('GET_USERS', {}, 300),
+    ]);
+    var agendas = results[0];
+    var areas   = results[1];
+    var users   = results[2];
+
+    var agendaRows = agendas.length === 0
+      ? ''
+      : agendas.map(function(ag) {
+          var area          = areas.find(function(a) { return a.area_id === ag.area_id; });
+          var deptLabel     = ag.dept     || (area ? area.dept     : ag.area_id);
+          var kategoriLabel = ag.kategori || (area ? area.kategori : '—');
+          var auditorList = (ag.auditor_emails || '').split(',').map(function(e) {
+            var email  = e.trim();
+            var u      = users.find(function(x) { return x.email === email; });
+            var nama   = u ? u.nama : email.split('@')[0];
+            var isLead = email === ag.lead_auditor;
+            return '<div style="font-size:11px;' + (isLead ? 'color:var(--blue,#1e3a5f);font-weight:700' : '') + '">' + escHtml(nama) + '</div>';
+          }).join('');
+          var mulaiCol = ag.jadwal_tanggal
+            ? '<span class="text-sm">' + formatDate(ag.jadwal_tanggal) + '</span>'
+            : '<span style="color:var(--text-muted);font-size:11px">Belum dimulai</span>';
+          var agData = JSON.stringify({
+            agenda_id:      ag.agenda_id,
+            area_id:        ag.area_id,
+            dept:           deptLabel,
+            kategori:       kategoriLabel,
+            auditor_emails: ag.auditor_emails,
+            lead_auditor:   ag.lead_auditor,
+            status:         ag.status || 'PLANNED',
+            period_id:      periodId,
+            period_status:  results[0] ? '' : '', // diisi di bawah
+          }).replace(/'/g, "&#39;");
+
+          return '<tr>' +
+            '<td class="text-sm text-muted" style="text-align:center">' + (agendas.indexOf(ag) + 1) + '</td>' +
+            '<td><strong>' + escHtml(deptLabel) + '</strong></td>' +
+            '<td><span class="badge badge-blue">' + escHtml(kategoriLabel) + '</span></td>' +
+            '<td>' + auditorList + '</td>' +
+            '<td>' + mulaiCol + '</td>' +
+            '<td>' + statusBadge(ag.status) + '</td>' +
+            '<td style="text-align:center">' +
+              '<button class="btn btn-ghost btn-icon" title="Edit Audit Plan" ' +
+                'data-ag=\'' + JSON.stringify({
+                  agenda_id:      ag.agenda_id,
+                  area_id:        ag.area_id,
+                  dept:           deptLabel,
+                  kategori:       kategoriLabel,
+                  auditor_emails: ag.auditor_emails || '',
+                  lead_auditor:   ag.lead_auditor || '',
+                  status:         ag.status || 'PLANNED',
+                  period_id:      periodId,
+                }).replace(/'/g,"&#39;") + '\' ' +
+                'onclick="var b=this;singleClick(b,function(){ openEditAgendaModal(JSON.parse(b.dataset.ag)) })">' +
+                '<i data-lucide="pencil" style="width:13px;height:13px"></i>' +
+              '</button>' +
+            '</td>' +
+          '</tr>';
+        }).join('');
+
+    contentDiv.innerHTML =
+      '<div class="table-wrap"><table>' +
+        '<thead><tr><th style="width:40px">No</th><th>Dept</th><th>Kategori</th><th>Auditor</th><th>Mulai</th><th>Status</th><th style="width:60px">Edit</th></tr></thead>' +
+        '<tbody>' + agendaRows + '</tbody>' +
+      '</table></div>' +
+      '<button class="btn btn-ghost" onclick="singleClick(this,function(){ openAgendaModal(\'' + escHtml(periodId) + '\') })" ' +
+        'style="width:100%;padding:14px 10px;border-radius:0;color:var(--text-muted);display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;margin-top:8px">' +
+        '<i data-lucide="plus-circle" style="width:14px;height:14px"></i> Buat Audit Plan' +
+      '</button>';
+
+    window._currentPeriodId = periodId;
+    lucide.createIcons();
+  } catch(err) {
+    contentDiv.innerHTML = '<div class="empty-state" style="padding:20px"><div class="empty-desc">Error: ' + escHtml(err.message) + '</div></div>';
+  }
+}
+
+// ============================================================
+//  AUDIT PLAN — Full Screen Modal (Opsi A)
+//  Paste di Page_Admin.html, setelah loadAgendaForPeriod
+// ============================================================
+
+// ── Helper: buka/tutup fullscreen overlay ───────────────────
+
+function _openFullscreen(id, html) {
+  var existing = document.getElementById(id);
+  if (existing) existing.remove();
+  var el = document.createElement('div');
+  el.id = id;
+  el.style.cssText = [
+    'position:fixed', 'inset:0', 'z-index:1000',
+    'background:var(--surface)', 'display:flex', 'flex-direction:column',
+    'overflow:hidden'
+  ].join(';');
+  el.innerHTML = html;
+  document.body.appendChild(el);
+  lucide.createIcons();
+}
+
+function _closeFullscreen(id) {
+  var el = document.getElementById(id);
+  if (el) el.remove();
+}
+
+function _stepIndicator(active) {
+  return '<div style="display:flex;align-items:center;gap:4px">' +
+    [1,2,3].map(function(n) {
+      var isActive = n === active;
+      var isDone   = n < active;
+      return '<div style="display:flex;align-items:center;gap:4px">' +
+        '<div style="width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;' +
+          (isActive ? 'background:var(--blue);color:#fff' :
+           isDone   ? 'background:var(--emerald,#10b981);color:#fff' :
+                      'background:var(--border);color:var(--text-muted)') + '">' +
+          (isDone ? '✓' : n) +
+        '</div>' +
+        (n < 3 ? '<div style="width:16px;height:1px;background:var(--border)"></div>' : '') +
+      '</div>';
+    }).join('') +
+  '</div>';
+}
+
+// ── Main entry point ─────────────────────────────────────────
+
+async function openAgendaModal(periodId) {
+  var results  = await Promise.all([
+    cachedApi('GET_AREAS', {}, 300),
+    cachedApi('GET_USERS', {}, 300),
+    api('GET_AGENDAS_BY_PERIOD', { period_id: periodId }),
+  ]);
+  var areas    = results[0];
+  var users    = results[1];
+  var agendas  = results[2];
+  var auditors = users.filter(function(u) {
+    var roles  = Array.isArray(u.roles) ? u.roles : (u.roles || '').split(',').map(function(r){ return r.trim(); });
+    var aktif  = u.aktif === true || u.aktif === 'TRUE' || u.aktif === '' || u.aktif === undefined;
+    return roles.includes('Auditor') && aktif;
+  });
+
+  var existingAreaIds = agendas.map(function(a) { return a.area_id; });
+  var availableAreas  = areas.filter(function(a) {
+    return !existingAreaIds.includes(a.area_id) && (a.aktif === true || a.aktif === 'TRUE');
+  });
+
+  window._ag1Validated       = false;
+  window._agendaAllAuditors  = auditors;
+  window._agendaAllAreas     = areas;
+  window._agendaRemovedIds   = [];         // track yang dihapus user
+  window._agendaOriginalCount = availableAreas.length; // jumlah awal sebelum user hapus
+
+  window._agendaState = {
+    periodId: periodId,
+    // Array of { area_id, dept, kategori, auditorEmails:[], leadAuditor:'', checklist:[], selected:{}, confirmed:false }
+    areas: availableAreas.map(function(a) {
+      return {
+        area_id:       a.area_id,
+        dept:          a.dept,
+        kategori:      a.kategori,
+        auditorEmails: [],
+        leadAuditor:   '',
+        checklist:     [],
+        selected:      {},
+        confirmed:     false,
+      };
+    }),
+    activeAreaIdx: 0,
+  };
+
+  _renderAgendaStep1();
+}
+
+// ════════════════════════════════════════════════════════════
+//  STEP 1 — Area & Auditor
+// ════════════════════════════════════════════════════════════
+
+function _renderAgendaStep1() {
+  var state    = window._agendaState;
+  var auditors = window._agendaAllAuditors || [];
+
+  _openFullscreen('agenda-fullscreen',
+    // Header
+    '<div style="padding:14px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;flex-shrink:0;background:var(--surface)">' +
+      '<button class="btn btn-ghost btn-icon" onclick="_closeFullscreen(\'agenda-fullscreen\')" title="Tutup">' +
+        '<i data-lucide="x" style="width:16px;height:16px"></i>' +
+      '</button>' +
+      '<div>' +
+        '<div style="font-weight:700;font-size:15px">Buat Audit Plan</div>' +
+        '<div style="font-size:11px;color:var(--text-muted)">Langkah 1 dari 3 — Pilih Area & Assign Auditor</div>' +
+      '</div>' +
+      '<div style="margin-left:auto">' + _stepIndicator(1) + '</div>' +
+    '</div>' +
+
+    // Body
+    '<div style="flex:1;overflow-y:auto;padding:24px 32px;background:var(--bg)">' +
+      '<div style="max-width:900px;margin:0 auto">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+          '<div>' +
+            '<div style="font-size:13px;font-weight:600">Daftar Area Tersedia</div>' +
+            '<div style="font-size:12px;color:var(--text-muted);margin-top:2px" id="ag1-area-count">' + state.areas.length + ' area dalam audit plan ini</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;align-items:center">' +
+            '<input id="ag1-search" class="form-control" placeholder="Cari area..." style="width:200px;font-size:13px" oninput="_ag1FilterAreas()">' +
+            '<div style="position:relative">' +
+              '<button class="btn btn-outline btn-sm" onclick="_ag1ShowAddAreaDD()" id="ag1-add-area-btn">' +
+                '<i data-lucide="plus" style="width:13px;height:13px"></i> Tambah Area' +
+              '</button>' +
+              '<div id="ag1-add-area-dd" style="display:none;position:absolute;right:0;top:calc(100% + 4px);' +
+                'background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);' +
+                'box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:220px;z-index:100;max-height:280px;overflow-y:auto">' +
+                _ag1AddAreaDropdownItems() +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="ag1-area-list">' + _renderStep1AreaList() + '</div>' +
+      '</div>' +
+    '</div>' +
+
+    // Footer
+    '<div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:var(--surface)">' +
+      '<span id="ag1-footer-hint" style="font-size:12px;color:var(--text-muted)">' + _ag1FooterHint() + '</span>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn btn-outline" onclick="_closeFullscreen(\'agenda-fullscreen\')">Batal</button>' +
+        '<button class="btn btn-primary" id="ag-step1-next" onclick="singleClick(this,function(){ _agendaStep1Next() })">' +
+          'Pilih Checklist <i data-lucide="arrow-right" style="width:14px;height:14px;margin-left:4px"></i>' +
+        '</button>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function _ag1FooterHint() {
+  var state    = window._agendaState;
+  var selected = state.areas.filter(function(a) { return a.auditorEmails.length > 0; });
+  var total    = state.areas.length;
+  if (total === 0) return 'Tidak ada area tersedia — semua sudah memiliki audit plan.';
+  return selected.length + ' dari ' + total + ' area sudah di-assign auditor';
+}
+
+function _renderStep1AreaList() {
+  var state = window._agendaState;
+  var q     = '';
+  var searchEl = document.getElementById('ag1-search');
+  if (searchEl) q = searchEl.value.toLowerCase();
+
+  if (state.areas.length === 0) {
+    var allAreas    = window._agendaAllAreas || [];
+    var currentIds  = state.areas.map(function(a) { return a.area_id; });
+    var hasAddable  = allAreas.some(function(a) {
+      return !currentIds.includes(a.area_id) && (a.aktif === true || a.aktif === 'TRUE');
+    });
+    return '<div class="empty-state" style="padding:60px 0">' +
+      '<i data-lucide="' + (hasAddable ? 'inbox' : 'check-circle') + '" style="width:40px;height:40px;opacity:.2;margin-bottom:12px"></i>' +
+      '<div class="empty-title">' + (hasAddable ? 'Semua Area Dihapus dari Plan' : 'Semua Area Sudah Punya Audit Plan') + '</div>' +
+      '<div class="empty-desc">' + (hasAddable
+        ? 'Gunakan tombol "Tambah Area" untuk menambahkan area kembali.'
+        : 'Tidak ada area baru yang bisa ditambahkan untuk periode ini.') +
+      '</div>' +
+    '</div>';
+  }
+
+  var filtered = state.areas.filter(function(a) {
+    return !q || a.dept.toLowerCase().includes(q) || a.kategori.toLowerCase().includes(q);
+  });
+
+  if (!filtered.length) {
+    return '<div style="padding:40px;text-align:center;color:var(--text-muted);font-size:13px">Tidak ada area yang cocok.</div>';
+  }
+
+  // Urutan kategori tetap — dari CONFIG.KATEGORI
+  var KATEGORI_ORDER = ['Produksi', 'Gudang', 'Maintenance', 'Laboratorium', 'Office'];
+  var groupMap = {};
+  filtered.forEach(function(a) {
+    if (!groupMap[a.kategori]) groupMap[a.kategori] = [];
+    groupMap[a.kategori].push(a);
+  });
+  // Hanya tampilkan kategori yang ada, tapi urutan mengikuti KATEGORI_ORDER
+  var groupOrder = KATEGORI_ORDER.filter(function(k) { return groupMap[k]; });
+  // Kategori yang tidak ada di KATEGORI_ORDER, append di akhir
+  Object.keys(groupMap).forEach(function(k) {
+    if (!groupOrder.includes(k)) groupOrder.push(k);
+  });
+
+  // Global numbering across all areas
+  var globalNum = 0;
+  var totalAreas = state.areas.length;
+
+  return groupOrder.map(function(kategori) {
+    var groupAreas = groupMap[kategori];
+    var groupHtml = groupAreas.map(function(a) {
+      globalNum++;
+      var num      = globalNum;
+      var single   = a.auditorEmails.length === 1;
+      var hasError = a.auditorEmails.length === 0;
+
+      return '<div class="card" style="border:1px solid var(--border);display:flex;flex-direction:column;overflow:visible" id="ag1-row-' + escHtml(a.area_id) + '">' +
+        '<div style="padding:10px 12px">' +
+          // Row header
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+            '<span style="font-size:11px;font-weight:700;color:var(--text-muted);min-width:20px">#' + num + '</span>' +
+            '<span style="font-weight:600;font-size:13px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escHtml(a.dept) + '</span>' +
+            '<button class="btn btn-ghost btn-icon" title="Hapus area ini" onclick="_ag1RemoveArea(\'' + escHtml(a.area_id) + '\')" style="flex-shrink:0;width:24px;height:24px">' +
+              '<i data-lucide="x" style="width:13px;height:13px;color:var(--text-muted)"></i>' +
+            '</button>' +
+          '</div>' +
+          // Auditor search input
+          '<div style="position:relative;margin-bottom:6px">' +
+            '<input class="form-control" id="ag1-search-' + escHtml(a.area_id) + '" placeholder="Tambah auditor..." ' +
+              'autocomplete="off" style="font-size:12px;padding:6px 28px 6px 10px;height:32px" ' +
+              'oninput="_ag1FilterAuditorDD(\'' + escHtml(a.area_id) + '\')" ' +
+              'onfocus="_ag1ShowAuditorDD(\'' + escHtml(a.area_id) + '\')">' +
+            '<i data-lucide="search" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);width:12px;height:12px;color:var(--text-muted);pointer-events:none"></i>' +
+            '<div id="ag1-dd-' + escHtml(a.area_id) + '" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;' +
+              'background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);' +
+              'box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:180px;overflow-y:auto;z-index:100">' +
+              _ag1AuditorDropdownItems(a.area_id) +
+            '</div>' +
+          '</div>' +
+          // Selected auditors
+          '<div id="ag1-selected-' + escHtml(a.area_id) + '">' +
+            _ag1RenderSelectedAuditors(a.area_id) +
+          '</div>' +
+          (hasError && window._ag1Validated ? '<div style="font-size:11px;color:var(--rose);margin-top:4px">⚠ Pilih minimal 1 auditor</div>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    return '<div style="margin-bottom:20px">' +
+      // Kategori header
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+        '<span class="badge badge-blue">' + escHtml(kategori) + '</span>' +
+        '<span style="font-size:12px;color:var(--text-muted)">' + groupAreas.length + ' area</span>' +
+        '<div style="flex:1;height:1px;background:var(--border)"></div>' +
+      '</div>' +
+      // 2-column grid
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+        groupHtml +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function _ag1AuditorDropdownItems(areaId) {
+  var state    = window._agendaState;
+  var area     = state.areas.find(function(a) { return a.area_id === areaId; });
+  var auditors = window._agendaAllAuditors || [];
+  var searchEl = document.getElementById('ag1-search-' + areaId);
+  var q        = searchEl ? searchEl.value.toLowerCase() : '';
+
+  return auditors.filter(function(u) {
+    return !q || u.nama.toLowerCase().includes(q);
+  }).map(function(u) {
+    var checked = area && area.auditorEmails.includes(u.email);
+    return '<div onclick="_ag1ToggleAuditor(\'' + escHtml(areaId) + '\',\'' + escHtml(u.email) + '\')" ' +
+      'style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;' +
+        (checked ? 'background:var(--bg)' : '') + '">' +
+      '<i data-lucide="' + (checked ? 'check-square' : 'square') + '" ' +
+        'style="width:14px;height:14px;flex-shrink:0;color:' + (checked ? 'var(--blue)' : 'var(--text-muted)') + '"></i>' +
+      '<span>' + escHtml(u.nama) + '</span>' +
+    '</div>';
+  }).join('') || '<div style="padding:10px 12px;font-size:12px;color:var(--text-muted)">Tidak ada auditor.</div>';
+}
+
+function _ag1RenderSelectedAuditors(areaId) {
+  var state  = window._agendaState;
+  var area   = state.areas.find(function(a) { return a.area_id === areaId; });
+  if (!area || !area.auditorEmails.length) {
+    return '<div style="font-size:12px;color:var(--text-muted);padding:6px 0">Belum ada auditor dipilih</div>';
+  }
+  var auditors = window._agendaAllAuditors || [];
+  var single   = area.auditorEmails.length === 1;
+
+  return '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">' +
+    area.auditorEmails.map(function(email) {
+      var u      = auditors.find(function(x) { return x.email === email; });
+      var nama   = u ? u.nama : email.split('@')[0];
+      var isLead = area.leadAuditor === email;
+      return '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;' +
+        'border:1px solid ' + (isLead ? 'var(--blue,#3b82f6)' : 'var(--border)') + ';' +
+        'border-radius:20px;background:' + (isLead ? 'rgba(59,130,246,.08)' : 'var(--surface)') + ';font-size:12px;' +
+        (!single ? 'cursor:pointer' : '') + '" ' +
+        (!single ? 'onclick="_ag1SetLead(\'' + escHtml(areaId) + '\',\'' + escHtml(email) + '\')" ' : '') +
+        'title="' + (single ? 'Lead otomatis' : (isLead ? 'Klik untuk unset lead' : 'Klik untuk set sebagai lead')) + '">' +
+        (isLead ? '<span style="font-size:10px;font-weight:700;color:var(--blue,#3b82f6)">LEAD</span>' : '') +
+        '<span style="' + (isLead ? 'color:var(--blue,#3b82f6);font-weight:600' : '') + '">' + escHtml(nama) + '</span>' +
+        '<button onclick="event.stopPropagation();_ag1ToggleAuditor(\'' + escHtml(areaId) + '\',\'' + escHtml(email) + '\')" ' +
+          'style="background:none;border:none;padding:0;cursor:pointer;color:var(--text-muted);display:flex;margin-left:2px">' +
+          '<i data-lucide="x" style="width:11px;height:11px"></i>' +
+        '</button>' +
+      '</div>';
+    }).join('') +
+  '</div>' +
+  '<div style="font-size:11px;color:var(--text-muted);margin-top:4px">' +
+    (single
+      ? '1 auditor · otomatis Lead'
+      : area.auditorEmails.length + ' auditor · ' + (area.leadAuditor ? 'Lead: ✓' : '<span style="color:var(--rose)">Klik nama untuk set Lead</span>')) +
+  '</div>';
+}
+
+function _ag1ShowAuditorDD(areaId) {
+  var dd = document.getElementById('ag1-dd-' + areaId);
+  if (dd) dd.style.display = '';
+  setTimeout(function() {
+    document.addEventListener('click', function _close(e) {
+      var search = document.getElementById('ag1-search-' + areaId);
+      var dd2    = document.getElementById('ag1-dd-' + areaId);
+      if (dd2 && search && !dd2.contains(e.target) && e.target !== search) {
+        dd2.style.display = 'none';
+        document.removeEventListener('click', _close);
+      }
+    });
+  }, 10);
+}
+
+function _ag1FilterAuditorDD(areaId) {
+  var dd = document.getElementById('ag1-dd-' + areaId);
+  if (dd) {
+    dd.innerHTML = _ag1AuditorDropdownItems(areaId);
+    dd.style.display = '';
+    lucide.createIcons();
+  }
+}
+
+function _ag1ToggleAuditor(areaId, email) {
+  var state = window._agendaState;
+  var area  = state.areas.find(function(a) { return a.area_id === areaId; });
+  if (!area) return;
+  var idx = area.auditorEmails.indexOf(email);
+  if (idx === -1) {
+    area.auditorEmails.push(email);
+  } else {
+    area.auditorEmails.splice(idx, 1);
+    if (area.leadAuditor === email) area.leadAuditor = '';
+  }
+  if (area.auditorEmails.length === 1) area.leadAuditor = area.auditorEmails[0];
+  else if (!area.auditorEmails.includes(area.leadAuditor)) area.leadAuditor = '';
+
+  // Refresh dropdown + selected
+  var dd = document.getElementById('ag1-dd-' + areaId);
+  if (dd) { dd.innerHTML = _ag1AuditorDropdownItems(areaId); lucide.createIcons(); }
+  var sel = document.getElementById('ag1-selected-' + areaId);
+  if (sel) { sel.innerHTML = _ag1RenderSelectedAuditors(areaId); lucide.createIcons(); }
+  // Update footer hint
+  var hint = document.getElementById('ag1-footer-hint');
+  if (hint) hint.textContent = _ag1FooterHint();
+}
+
+function _ag1SetLead(areaId, email) {
+  var state = window._agendaState;
+  var area  = state.areas.find(function(a) { return a.area_id === areaId; });
+  if (!area || area.auditorEmails.length <= 1) return;
+  area.leadAuditor = (area.leadAuditor === email) ? '' : email;
+  var sel = document.getElementById('ag1-selected-' + areaId);
+  if (sel) { sel.innerHTML = _ag1RenderSelectedAuditors(areaId); lucide.createIcons(); }
+}
+
+function _ag1RemoveArea(areaId) {
+  var state = window._agendaState;
+  state.areas = state.areas.filter(function(a) { return a.area_id !== areaId; });
+  var list = document.getElementById('ag1-area-list');
+  if (list) { list.innerHTML = _renderStep1AreaList(); lucide.createIcons(); }
+  var hint = document.getElementById('ag1-footer-hint');
+  if (hint) hint.textContent = _ag1FooterHint();
+  var count = document.getElementById('ag1-area-count');
+  if (count) count.textContent = state.areas.length + ' area dalam audit plan ini';
+}
+
+function _ag1ShowRestoreDD() {
+  var dd = document.getElementById('ag1-restore-dd');
+  if (!dd) return;
+  dd.style.display = dd.style.display === 'none' ? '' : 'none';
+  lucide.createIcons();
+  setTimeout(function() {
+    document.addEventListener('click', function _close(e) {
+      var btn = document.getElementById('ag1-restore-btn');
+      var dd2 = document.getElementById('ag1-restore-dd');
+      if (dd2 && btn && !dd2.contains(e.target) && e.target !== btn) {
+        dd2.style.display = 'none';
+        document.removeEventListener('click', _close);
+      }
+    });
+  }, 10);
+}
+
+function _ag1RestoreArea(areaId) {
+  var state    = window._agendaState;
+  var allAreas = window._agendaAllAreas || [];
+  var area     = allAreas.find(function(a) { return a.area_id === areaId; });
+  if (!area) return;
+  state.areas.push({
+    area_id:       area.area_id,
+    dept:          area.dept,
+    kategori:      area.kategori,
+    auditorEmails: [],
+    leadAuditor:   '',
+    checklist:     [],
+    selected:      {},
+    confirmed:     false,
+  });
+  window._agendaRemovedIds = (window._agendaRemovedIds || []).filter(function(id) { return id !== areaId; });
+  var list = document.getElementById('ag1-area-list');
+  if (list) { list.innerHTML = _renderStep1AreaList(); lucide.createIcons(); }
+  var hint = document.getElementById('ag1-footer-hint');
+  if (hint) hint.textContent = _ag1FooterHint();
+  var count = document.getElementById('ag1-area-count');
+  if (count) count.textContent = state.areas.length + ' area dalam audit plan ini';
+}
+
+function _ag1AddAreaDropdownItems() {
+  var state        = window._agendaState;
+  var allAreas     = window._agendaAllAreas || [];
+  var currentIds   = state.areas.map(function(a) { return a.area_id; });
+  // Area yang belum ada di plan saat ini (belum di wizard, bukan removed)
+  var addable      = allAreas.filter(function(a) {
+    return !currentIds.includes(a.area_id) && (a.aktif === true || a.aktif === 'TRUE');
+  });
+
+  if (!addable.length) {
+    return '<div style="padding:12px 14px;font-size:12px;color:var(--text-muted)">Semua area sudah ada dalam plan ini.</div>';
+  }
+
+  return addable.map(function(area) {
+    return '<div onclick="_ag1AddArea(\'' + escHtml(area.area_id) + '\')" ' +
+      'style="padding:9px 14px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px" ' +
+      'onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'">' +
+      '<i data-lucide="building-2" style="width:13px;height:13px;color:var(--text-muted)"></i>' +
+      '<div>' +
+        '<div style="font-weight:600">' + escHtml(area.dept) + '</div>' +
+        '<div style="font-size:11px;color:var(--text-muted)">' + escHtml(area.kategori) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function _ag1ShowAddAreaDD() {
+  var dd = document.getElementById('ag1-add-area-dd');
+  if (!dd) return;
+  dd.innerHTML = _ag1AddAreaDropdownItems();
+  lucide.createIcons();
+  dd.style.display = dd.style.display === 'none' ? '' : 'none';
+  setTimeout(function() {
+    document.addEventListener('click', function _close(e) {
+      var btn = document.getElementById('ag1-add-area-btn');
+      var dd2 = document.getElementById('ag1-add-area-dd');
+      if (dd2 && btn && !dd2.contains(e.target) && e.target !== btn) {
+        dd2.style.display = 'none';
+        document.removeEventListener('click', _close);
+      }
+    });
+  }, 10);
+}
+
+function _ag1AddArea(areaId) {
+  var state    = window._agendaState;
+  var allAreas = window._agendaAllAreas || [];
+  var area     = allAreas.find(function(a) { return a.area_id === areaId; });
+  if (!area) return;
+  state.areas.push({
+    area_id:       area.area_id,
+    dept:          area.dept,
+    kategori:      area.kategori,
+    auditorEmails: [],
+    leadAuditor:   '',
+    checklist:     [],
+    selected:      {},
+    confirmed:     false,
+  });
+  // Tutup dropdown
+  var dd = document.getElementById('ag1-add-area-dd');
+  if (dd) dd.style.display = 'none';
+  // Re-render
+  var list = document.getElementById('ag1-area-list');
+  if (list) { list.innerHTML = _renderStep1AreaList(); lucide.createIcons(); }
+  var hint = document.getElementById('ag1-footer-hint');
+  if (hint) hint.textContent = _ag1FooterHint();
+  var count = document.getElementById('ag1-area-count');
+  if (count) count.textContent = state.areas.length + ' area dalam audit plan ini';
+}
+
+// ════════════════════════════════════════════════════════════
+//  EDIT AGENDA MODAL
+// ════════════════════════════════════════════════════════════
+
+async function openEditAgendaModal(ag) {
+  // Load data yang diperlukan
+  var results  = await Promise.all([
+    cachedApi('GET_USERS', {}, 300),
+    api('GET_AUDIT_RESULTS', { agenda_id: ag.agenda_id, period_id: ag.period_id }),
+    api('GET_CHECKLIST_FOR_AGENDA', { kategori: ag.kategori }),
+  ]);
+  var users         = results[0];
+  var savedItems    = results[1]; // AUDIT_RESULTS yang sudah berisi snapshot checklist
+  var allItems      = results[2]; // semua item tersedia
+
+  var auditors = users.filter(function(u) {
+    var roles  = Array.isArray(u.roles) ? u.roles : (u.roles || '').split(',').map(function(r){ return r.trim(); });
+    var aktif  = u.aktif === true || u.aktif === 'TRUE' || u.aktif === '' || u.aktif === undefined;
+    return roles.includes('Auditor') && aktif;
+  });
+
+  // State edit
+  var savedItemIds   = savedItems.map(function(i) { return i.item_id; });
+  // Simpan untuk diff check nanti
+  window._editAg = window._editAg || {};
+  var currentEmails  = (ag.auditor_emails || '').split(',').map(function(e){ return e.trim(); }).filter(Boolean);
+  window._editAg = {
+    ag:              ag,
+    auditors:        auditors,
+    allItems:        allItems,
+    auditorEmails:   currentEmails,
+    leadAuditor:     ag.lead_auditor || '',
+    selected:        {},
+    tab:             'auditor',
+    _originalItemIds: savedItemIds,  // untuk diff check
+  };
+  allItems.forEach(function(i) {
+    window._editAg.selected[i.item_id] = savedItemIds.includes(i.item_id);
+  });
+
+  _renderEditAgendaModal();
+}
+
+function _renderEditAgendaModal() {
+  var s   = window._editAg;
+  var ag  = s.ag;
+  var tab = s.tab;
+
+  var auditorTabHtml = _renderEditAuditorTab();
+  var checklistTabHtml = _renderEditChecklistTab();
+
+  createModal({
+    id:   'edit-agenda-modal',
+    title: 'Edit Audit Plan — ' + escHtml(ag.dept),
+    size: 'modal-lg',
+    body:
+      // Warning kalau audit sudah dimulai
+      (ag.status === 'STARTED' || ag.status === 'DONE'
+        ? '<div style="background:rgba(245,158,11,.08);border:1px solid var(--amber,#f59e0b);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:14px;font-size:12px;display:flex;gap:8px">' +
+            '<i data-lucide="alert-triangle" style="width:14px;height:14px;color:var(--amber,#f59e0b);flex-shrink:0;margin-top:1px"></i>' +
+            '<span>Audit untuk area ini sudah dimulai. Menyimpan perubahan checklist akan <strong>menghapus semua hasil audit</strong> yang sudah diisi dan auditor harus mengisi ulang dari awal.</span>' +
+          '</div>'
+        : '') +
+      // Tabs
+      '<div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px">' +
+        '<button id="edit-ag-tab-auditor" onclick="_editAgSetTab(\'auditor\')" ' +
+          'style="padding:8px 18px;font-size:13px;font-weight:600;border:none;background:none;cursor:pointer;border-bottom:2px solid ' +
+          (tab === 'auditor' ? 'var(--blue)' : 'transparent') + ';color:' + (tab === 'auditor' ? 'var(--blue)' : 'var(--text-muted)') + '">' +
+          'Auditor' +
+        '</button>' +
+        '<button id="edit-ag-tab-checklist" onclick="_editAgSetTab(\'checklist\')" ' +
+          'style="padding:8px 18px;font-size:13px;font-weight:600;border:none;background:none;cursor:pointer;border-bottom:2px solid ' +
+          (tab === 'checklist' ? 'var(--blue)' : 'transparent') + ';color:' + (tab === 'checklist' ? 'var(--blue)' : 'var(--text-muted)') + '">' +
+          'Checklist' +
+        '</button>' +
+      '</div>' +
+      // Tab content
+      '<div id="edit-ag-tab-content">' +
+        (tab === 'auditor' ? auditorTabHtml : checklistTabHtml) +
+      '</div>',
+    footer:
+      '<button class="btn btn-danger btn-sm" style="margin-right:auto" id="delete-agenda-btn" ' +
+        'onclick="singleClick(this,function(){ _deleteAgendaConfirm(document.getElementById(\'delete-agenda-btn\')) })">' +
+        '<i data-lucide="trash-2" style="width:13px;height:13px"></i> Hapus Audit Plan Area Ini' +
+      '</button>' +
+      '<button class="btn btn-outline" onclick="closeModal(\'edit-agenda-modal\')">Batal</button>' +
+      '<button class="btn btn-primary" id="edit-ag-save-btn" ' +
+        'onclick="singleClick(this,function(){ _saveEditAgenda(document.getElementById(\'edit-ag-save-btn\')) })">' +
+        '<i data-lucide="save" style="width:13px;height:13px"></i> Simpan Perubahan' +
+      '</button>',
+  });
+  lucide.createIcons();
+}
+
+function _editAgSetTab(tab) {
+  window._editAg.tab = tab;
+  var content = document.getElementById('edit-ag-tab-content');
+  if (content) {
+    content.innerHTML = tab === 'auditor'
+      ? _renderEditAuditorTab()
+      : _renderEditChecklistTab();
+    lucide.createIcons();
+  }
+  // Update tab style
+  ['auditor','checklist'].forEach(function(t) {
+    var btn = document.getElementById('edit-ag-tab-' + t);
+    if (!btn) return;
+    btn.style.borderBottomColor = t === tab ? 'var(--blue)' : 'transparent';
+    btn.style.color = t === tab ? 'var(--blue)' : 'var(--text-muted)';
+  });
+}
+
+function _renderEditAuditorTab() {
+  var s        = window._editAg;
+  var auditors = s.auditors;
+  var single   = s.auditorEmails.length === 1;
+
+  var dropdownItems = auditors.map(function(u) {
+    var checked = s.auditorEmails.includes(u.email);
+    return '<div onclick="_editAgToggleAuditor(\'' + escHtml(u.email) + '\')" ' +
+      'style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;' +
+        (checked ? 'background:var(--bg)' : '') + '">' +
+      '<i data-lucide="' + (checked ? 'check-square' : 'square') + '" ' +
+        'style="width:14px;height:14px;flex-shrink:0;color:' + (checked ? 'var(--blue)' : 'var(--text-muted)') + '"></i>' +
+      '<span>' + escHtml(u.nama) + '</span>' +
+    '</div>';
+  }).join('') || '<div style="padding:10px 12px;font-size:12px;color:var(--text-muted)">Tidak ada auditor.</div>';
+
+  var chips = s.auditorEmails.length === 0
+    ? '<div style="font-size:12px;color:var(--text-muted);padding:6px 0">Belum ada auditor dipilih</div>'
+    : '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">' +
+        s.auditorEmails.map(function(email) {
+          var u      = auditors.find(function(x) { return x.email === email; });
+          var nama   = u ? u.nama : email.split('@')[0];
+          var isLead = s.leadAuditor === email;
+          return '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;' +
+            'border:1px solid ' + (isLead ? 'var(--blue,#3b82f6)' : 'var(--border)') + ';' +
+            'border-radius:20px;background:' + (isLead ? 'rgba(59,130,246,.08)' : 'var(--surface)') + ';font-size:12px;' +
+            (!single ? 'cursor:pointer' : '') + '" ' +
+            (!single ? 'onclick="_editAgSetLead(\'' + escHtml(email) + '\')" ' : '') +
+            'title="' + (isLead ? 'Klik untuk unset lead' : 'Klik untuk set lead') + '">' +
+            (isLead ? '<span style="font-size:10px;font-weight:700;color:var(--blue)">LEAD</span>' : '') +
+            '<span style="' + (isLead ? 'color:var(--blue);font-weight:600' : '') + '">' + escHtml(nama) + '</span>' +
+            '<button onclick="event.stopPropagation();_editAgToggleAuditor(\'' + escHtml(email) + '\')" ' +
+              'style="background:none;border:none;padding:0;cursor:pointer;color:var(--text-muted);display:flex;margin-left:2px">' +
+              '<i data-lucide="x" style="width:11px;height:11px"></i>' +
+            '</button>' +
+          '</div>';
+        }).join('') +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--text-muted)">' +
+        (single ? '1 auditor · otomatis Lead'
+          : s.auditorEmails.length + ' auditor · ' +
+            (s.leadAuditor ? 'Lead: ✓' : '<span style="color:var(--rose)">Klik nama untuk set Lead</span>')) +
+      '</div>';
+
+  return '<div class="form-group">' +
+    '<label class="form-label">Auditor</label>' +
+    '<div style="position:relative;margin-bottom:10px">' +
+      '<input class="form-control" id="edit-ag-auditor-search" placeholder="Tambah auditor..." ' +
+        'autocomplete="off" style="font-size:13px" ' +
+        'oninput="_editAgFilterDD()" onfocus="_editAgShowDD()">' +
+      '<div id="edit-ag-dd" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;' +
+        'background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);' +
+        'box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:200px;overflow-y:auto;z-index:200">' +
+        dropdownItems +
+      '</div>' +
+    '</div>' +
+    '<div id="edit-ag-chips">' + chips + '</div>' +
+  '</div>';
+}
+
+function _renderEditChecklistTab() {
+  var s     = window._editAg;
+  var items = s.allItems;
+  var general = items.filter(function(i) { return i.tipe === 'GENERAL'; });
+  var khusus  = items.filter(function(i) { return i.tipe === 'KHUSUS'; });
+  var curTab  = window._editAg._clTab || 'general';
+  var q       = (window._editAg._clSearch || '').toLowerCase().trim();
+
+  var shownItems = (curTab === 'general' ? general : khusus)
+    .sort(function(a, b) { return Number(a.nomor) - Number(b.nomor); });
+
+  // Filter berdasarkan search: cocokkan ke aspek + persyaratan + check_item
+  if (q) {
+    shownItems = shownItems.filter(function(i) {
+      return (i.aspek || '').toLowerCase().includes(q) ||
+             (i.persyaratan || '').toLowerCase().includes(q) ||
+             (i.check_item || '').toLowerCase().includes(q);
+    });
+  }
+
+  var tabsHtml =
+    '<div style="display:flex;gap:6px;margin-bottom:10px">' +
+      '<button class="btn btn-sm ' + (curTab === 'general' ? 'btn-primary' : 'btn-outline') + '" ' +
+        'onclick="_editAgClTab(\'general\')" style="font-size:11px">General (' + general.length + ')</button>' +
+      (khusus.length
+        ? '<button class="btn btn-sm ' + (curTab === 'khusus' ? 'btn-primary' : 'btn-outline') + '" ' +
+            'onclick="_editAgClTab(\'khusus\')" style="font-size:11px">' + escHtml(s.ag.kategori) + ' (' + khusus.length + ')</button>'
+        : '') +
+    '</div>';
+
+  var searchHtml =
+    '<div style="position:relative;margin-bottom:10px">' +
+      '<input class="form-control" id="edit-ag-cl-search" placeholder="Cari aspek, persyaratan, atau check item..." ' +
+        'value="' + escHtml(window._editAg._clSearch || '') + '" autocomplete="off" ' +
+        'style="font-size:12px;padding:6px 28px 6px 10px;height:32px" oninput="_editAgClSearch(this.value)">' +
+      '<i data-lucide="search" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);width:12px;height:12px;color:var(--text-muted);pointer-events:none"></i>' +
+    '</div>';
+
+  var selectedCount = Object.values(s.selected).filter(Boolean).length;
+
+  // Group by persyaratan
+  var groups = [];
+  var groupMap = {};
+  shownItems.forEach(function(item) {
+    if (!groupMap[item.persyaratan]) {
+      groupMap[item.persyaratan] = { persyaratan: item.persyaratan, aspek: item.aspek, items: [] };
+      groups.push(groupMap[item.persyaratan]);
+    }
+    groupMap[item.persyaratan].items.push(item);
+  });
+
+  var groupsHtml = !groups.length
+    ? '<div style="padding:30px;text-align:center;color:var(--text-muted);font-size:13px">' +
+        (q ? 'Tidak ada item yang cocok dengan "' + escHtml(window._editAg._clSearch) + '".' : 'Tidak ada item.') +
+      '</div>'
+    : groups.map(function(g) {
+        var allChk  = g.items.every(function(i) { return s.selected[i.item_id]; });
+        var someChk = g.items.some(function(i)  { return s.selected[i.item_id]; });
+        return '<div style="margin-bottom:10px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden">' +
+          '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg);border-bottom:1px solid var(--border)">' +
+            '<input type="checkbox" ' + (allChk ? 'checked' : '') + ' ' +
+              'style="width:14px;height:14px;accent-color:var(--blue)" ' +
+              'onchange="_editAgToggleGroup(\'' + escHtml(g.persyaratan).replace(/'/g,"\\'") + '\',this.checked)">' +
+            '<span class="badge badge-blue" style="font-size:10px">' + escHtml(g.aspek) + '</span>' +
+            '<span style="font-size:12px;font-weight:600;flex:1">' + escHtml(g.persyaratan) + '</span>' +
+            '<span style="font-size:11px;color:var(--text-muted)">' +
+              g.items.filter(function(i){ return s.selected[i.item_id]; }).length + '/' + g.items.length +
+            '</span>' +
+          '</div>' +
+          g.items.map(function(item) {
+            return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;' +
+              (!s.selected[item.item_id] ? 'opacity:.5' : '') + '">' +
+              '<input type="checkbox" ' + (s.selected[item.item_id] ? 'checked' : '') + ' ' +
+                'style="width:13px;height:13px;accent-color:var(--blue);flex-shrink:0;margin-top:2px" ' +
+                'onchange="_editAgToggleItem(\'' + escHtml(item.item_id) + '\',this.checked)">' +
+              '<div style="flex:1;min-width:0">' +
+                '<div style="font-size:13px;margin-bottom:3px">' + escHtml(item.check_item) + '</div>' +
+                (item.standar_check_item
+                  ? '<div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">' +
+                      '<i data-lucide="info" style="width:10px;height:10px;vertical-align:middle"></i> ' + escHtml(item.standar_check_item) + '</div>'
+                  : '') +
+                (item.labels
+                  ? '<div>' + item.labels.split(',').map(function(l) {
+                      var t = l.trim();
+                      if (!t) return '';
+                      return '<span style="font-size:10px;padding:1px 6px;border-radius:8px;margin-right:2px;' +
+                        'background:var(--bg);border:1px solid var(--border);color:var(--text-muted)">' +
+                        escHtml(t) + '</span>';
+                    }).join('') + '</div>'
+                  : '') +
+              '</div>' +
+            '</div>';
+          }).join('') +
+        '</div>';
+      }).join('');
+
+  return tabsHtml + searchHtml +
+    '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">' +
+      selectedCount + ' dari ' + items.length + ' item dipilih' +
+      (q ? ' · ' + shownItems.length + ' cocok dengan pencarian' : '') +
+    '</div>' +
+    '<div style="max-height:320px;overflow-y:auto">' + groupsHtml + '</div>';
+}
+
+// ── Edit Agenda helpers ───────────────────────────────────────
+
+function _editAgShowDD() {
+  var dd = document.getElementById('edit-ag-dd');
+  if (dd) dd.style.display = '';
+  setTimeout(function() {
+    document.addEventListener('click', function _close(e) {
+      var inp = document.getElementById('edit-ag-auditor-search');
+      var dd2 = document.getElementById('edit-ag-dd');
+      if (dd2 && inp && !dd2.contains(e.target) && e.target !== inp) {
+        dd2.style.display = 'none';
+        document.removeEventListener('click', _close);
+      }
+    });
+  }, 10);
+}
+
+function _editAgFilterDD() {
+  var inp = document.getElementById('edit-ag-auditor-search');
+  var q   = inp ? inp.value.toLowerCase() : '';
+  var s   = window._editAg;
+  var dd  = document.getElementById('edit-ag-dd');
+  if (!dd) return;
+  dd.innerHTML = s.auditors.filter(function(u) {
+    return !q || u.nama.toLowerCase().includes(q);
+  }).map(function(u) {
+    var checked = s.auditorEmails.includes(u.email);
+    return '<div onclick="_editAgToggleAuditor(\'' + escHtml(u.email) + '\')" ' +
+      'style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;' +
+        (checked ? 'background:var(--bg)' : '') + '">' +
+      '<i data-lucide="' + (checked ? 'check-square' : 'square') + '" ' +
+        'style="width:14px;height:14px;flex-shrink:0;color:' + (checked ? 'var(--blue)' : 'var(--text-muted)') + '"></i>' +
+      '<span>' + escHtml(u.nama) + '</span>' +
+    '</div>';
+  }).join('') || '<div style="padding:10px 12px;font-size:12px;color:var(--text-muted)">Tidak ada auditor.</div>';
+  dd.style.display = '';
+  lucide.createIcons();
+}
+
+function _editAgToggleAuditor(email) {
+  var s   = window._editAg;
+  var idx = s.auditorEmails.indexOf(email);
+  if (idx === -1) {
+    s.auditorEmails.push(email);
+  } else {
+    s.auditorEmails.splice(idx, 1);
+    if (s.leadAuditor === email) s.leadAuditor = '';
+  }
+  if (s.auditorEmails.length === 1) s.leadAuditor = s.auditorEmails[0];
+  else if (!s.auditorEmails.includes(s.leadAuditor)) s.leadAuditor = '';
+
+  // Re-render tab content untuk refresh chips + dropdown
+  var content = document.getElementById('edit-ag-tab-content');
+  if (content) { content.innerHTML = _renderEditAuditorTab(); lucide.createIcons(); }
+}
+
+function _editAgSetLead(email) {
+  var s = window._editAg;
+  if (s.auditorEmails.length <= 1) return;
+  s.leadAuditor = (s.leadAuditor === email) ? '' : email;
+  var content = document.getElementById('edit-ag-tab-content');
+  if (content) { content.innerHTML = _renderEditAuditorTab(); lucide.createIcons(); }
+}
+
+function _editAgClTab(tab) {
+  window._editAg._clTab = tab;
+  var content = document.getElementById('edit-ag-tab-content');
+  if (content) { content.innerHTML = _renderEditChecklistTab(); lucide.createIcons(); }
+}
+
+function _editAgClSearch(val) {
+  window._editAg._clSearch = val;
+  var content = document.getElementById('edit-ag-tab-content');
+  if (!content) return;
+  // Re-render isi tab, lalu kembalikan fokus + posisi kursor ke input search
+  content.innerHTML = _renderEditChecklistTab();
+  lucide.createIcons();
+  var inp = document.getElementById('edit-ag-cl-search');
+  if (inp) {
+    inp.focus();
+    var len = inp.value.length;
+    inp.setSelectionRange(len, len);
+  }
+}
+
+function _editAgToggleItem(itemId, checked) {
+  window._editAg.selected[itemId] = checked;
+  // Refresh count
+  var content = document.getElementById('edit-ag-tab-content');
+  if (content) { content.innerHTML = _renderEditChecklistTab(); lucide.createIcons(); }
+}
+
+function _editAgToggleGroup(persyaratan, checked) {
+  var s = window._editAg;
+  s.allItems.forEach(function(item) {
+    if (item.persyaratan === persyaratan) s.selected[item.item_id] = checked;
+  });
+  var content = document.getElementById('edit-ag-tab-content');
+  if (content) { content.innerHTML = _renderEditChecklistTab(); lucide.createIcons(); }
+}
+
+async function _saveEditAgenda(btn) {
+  var s = window._editAg;
+  if (s.auditorEmails.length === 0) return toast('Pilih minimal 1 auditor.', 'error');
+
+  var selectedIds = Object.keys(s.selected).filter(function(id) { return s.selected[id]; });
+  if (selectedIds.length === 0) return toast('Pilih minimal 1 checklist item.', 'error');
+
+  // Cek apa yang berubah
+  var originalEmails  = (s.ag.auditor_emails || '').split(',').map(function(e){ return e.trim(); }).filter(Boolean).sort();
+  var newEmails       = s.auditorEmails.slice().sort();
+  var originalLead    = s.ag.lead_auditor || '';
+  var auditorChanged  = JSON.stringify(originalEmails) !== JSON.stringify(newEmails) || originalLead !== s.leadAuditor;
+
+  var originalItemIds = (s._originalItemIds || []).slice().sort();
+  var newItemIds      = selectedIds.slice().sort();
+  var checklistChanged = JSON.stringify(originalItemIds) !== JSON.stringify(newItemIds);
+
+  // Kalau tidak ada yang berubah
+  if (!auditorChanged && !checklistChanged) {
+    toast('Tidak ada perubahan.', 'info');
+    return;
+  }
+
+  // Session perlu di-reset hanya kalau checklist berubah
+  // Kalau hanya auditor berubah, session tidak perlu di-reset
+  var needReset = (s.ag.status === 'STARTED') && checklistChanged;
+
+  if (needReset) {
+    var ok = await showConfirm({
+      title:       'Simpan Perubahan',
+      message:     'Checklist diubah dan audit sudah dimulai.',
+      detail:      'Semua hasil audit yang sudah diisi akan dihapus dan auditor harus mengisi ulang dari awal.',
+      confirmText: 'Simpan & Reset Audit',
+      danger:      true,
+    });
+    if (!ok) return;
+  }
+
+  var restore = btnLoading(btn, 'Menyimpan...');
+  try {
+    await api('UPDATE_AGENDA', {
+      agenda_id:      s.ag.agenda_id,
+      period_id:      s.ag.period_id,
+      auditor_emails: auditorChanged  ? s.auditorEmails.join(',') : null,
+      lead_auditor:   auditorChanged  ? s.leadAuditor             : null,
+      item_ids:       checklistChanged ? selectedIds              : null,
+    });
+    clearCache('GET_AGENDAS_BY_PERIOD');
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    clearCache('GET_DASHBOARD');
+    toast('Audit plan berhasil diperbarui.', 'success');
+    closeModal('edit-agenda-modal');
+    _togglePeriodExpand(s.ag.period_id, '');
+    _togglePeriodExpand(s.ag.period_id, '');
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+async function _deleteAgendaConfirm(btn) {
+  var s  = window._editAg;
+  var ok = await showConfirm({
+    title:       'Hapus Audit Plan',
+    message:     'Hapus audit plan untuk ' + s.ag.dept + '?',
+    detail:      (s.ag.status === 'STARTED' || s.ag.status === 'DONE')
+      ? 'Semua hasil audit yang sudah diisi untuk area ini akan ikut dihapus.'
+      : 'Audit plan akan dihapus permanen.',
+    confirmText: 'Hapus',
+    danger:      true,
+  });
+  if (!ok) return;
+  var restore = btnLoading(btn, 'Menghapus...');
+  try {
+    await api('DELETE_AGENDA', {
+      agenda_id: s.ag.agenda_id,
+      period_id: s.ag.period_id,
+    });
+    clearCache('GET_AGENDAS_BY_PERIOD');
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    clearCache('GET_DASHBOARD');
+    toast('Audit plan berhasil dihapus.', 'success');
+    closeModal('edit-agenda-modal');
+    _togglePeriodExpand(s.ag.period_id, '');
+    _togglePeriodExpand(s.ag.period_id, '');
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+function _ag1FilterAreas() {
+  var list = document.getElementById('ag1-area-list');
+  if (list) { list.innerHTML = _renderStep1AreaList(); lucide.createIcons(); }
+}
+
+async function _agendaStep1Next() {
+  var btn   = document.getElementById('ag-step1-next');
+  var state = window._agendaState;
+
+  // Validasi: semua area yang ada harus punya auditor
+  var invalid = state.areas.filter(function(a) { return a.auditorEmails.length === 0; });
+  if (state.areas.length === 0) return toast('Tidak ada area yang bisa diaudit.', 'error');
+  if (invalid.length > 0) {
+    window._ag1Validated = true;
+    var list = document.getElementById('ag1-area-list');
+    if (list) { list.innerHTML = _renderStep1AreaList(); lucide.createIcons(); }
+    return toast(invalid.length + ' area belum di-assign auditor.', 'error');
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:13px;height:13px;border-width:2px"></div> Memuat...';
+
+  try {
+    // Load checklist untuk semua kategori unik
+    var kategoriList = [...new Set(state.areas.map(function(a) { return a.kategori; }))];
+    var results = await Promise.all(kategoriList.map(function(kat) {
+      return api('GET_CHECKLIST_FOR_AGENDA', { kategori: kat });
+    }));
+    // Simpan ke masing-masing area
+    state.areas.forEach(function(area) {
+      var idx      = kategoriList.indexOf(area.kategori);
+      var checklist = results[idx] || [];
+      area.checklist = checklist;
+      area.selected  = {};
+      checklist.forEach(function(item) { area.selected[item.item_id] = true; });
+      area.confirmed = false;
+    });
+    state.activeAreaIdx = 0;
+    _renderAgendaStep2();
+  } catch(err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = 'Pilih Checklist <i data-lucide="arrow-right" style="width:14px;height:14px;margin-left:4px"></i>';
+    lucide.createIcons();
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  STEP 2 — Checklist per Area
+// ════════════════════════════════════════════════════════════
+
+function _renderAgendaStep2() {
+  var state = window._agendaState;
+
+  _openFullscreen('agenda-fullscreen',
+    // Header wizard — satu baris bersih
+    '<div style="padding:12px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;flex-shrink:0;background:var(--surface)">' +
+      '<button class="btn btn-ghost btn-icon" onclick="_renderAgendaStep1()">' +
+        '<i data-lucide="arrow-left" style="width:16px;height:16px"></i>' +
+      '</button>' +
+      '<div style="font-weight:700;font-size:15px">Buat Audit Plan</div>' +
+      '<div style="font-size:11px;color:var(--text-muted);margin-left:4px">— Langkah 2 dari 3</div>' +
+      '<div style="margin-left:auto;display:flex;gap:12px;align-items:center">' +
+        '<span id="ag2-progress-text" style="font-size:12px;color:var(--text-muted)">' + _ag2ProgressText() + '</span>' +
+        _stepIndicator(2) +
+      '</div>' +
+    '</div>' +
+
+    // Body: sidebar + main
+    '<div style="flex:1;display:grid;grid-template-columns:220px 1fr;overflow:hidden">' +
+
+      // Sidebar — tanpa header "AREA"
+      '<div style="border-right:1px solid var(--border);overflow-y:auto;background:var(--surface)">' +
+        '<div id="ag2-sidebar" style="padding:8px">' + _renderAg2Sidebar() + '</div>' +
+      '</div>' +
+
+      // Main panel
+      '<div style="display:flex;flex-direction:column;overflow:hidden">' +
+
+        // Filter bar (tab + label) — rata kiri, kompak
+        '<div id="ag2-filter-bar" style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:var(--surface);flex-shrink:0">' +
+          _renderAg2FilterBar() +
+        '</div>' +
+
+        // Checklist items
+        '<div style="flex:1;overflow-y:auto;padding:14px 16px" id="ag2-checklist-panel">' +
+          _renderAg2ChecklistPanel() +
+        '</div>' +
+
+        // Footer panel — satu baris: count + bulk actions + konfirmasi
+        '<div style="padding:10px 16px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0;' +
+          'display:flex;align-items:center;gap:8px">' +
+          '<span id="ag2-item-count" style="font-size:12px;color:var(--text-muted);flex:1">' + _ag2ItemCountText() + '</span>' +
+          '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="_ag2SelectAllVisible()">' +
+            '<i data-lucide="check-square" style="width:12px;height:12px"></i> Pilih Semua' +
+          '</button>' +
+          '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="_ag2UnselectAllVisible()">' +
+            '<i data-lucide="square" style="width:12px;height:12px"></i> Hapus Semua' +
+          '</button>' +
+          '<div style="width:1px;height:20px;background:var(--border)"></div>' +
+          '<button class="btn btn-success btn-sm" id="ag2-confirm-btn" onclick="_ag2ConfirmArea()">' +
+            '<i data-lucide="check" style="width:13px;height:13px"></i> Konfirmasi' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    // Footer wizard
+    '<div style="padding:12px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:var(--surface)">' +
+      '<button class="btn btn-outline btn-sm" onclick="_renderAgendaStep1()">Kembali</button>' +
+      '<button class="btn btn-primary btn-sm" onclick="_agendaStep2Next()">' +
+        'Preview & Simpan <i data-lucide="arrow-right" style="width:14px;height:14px;margin-left:4px"></i>' +
+      '</button>' +
+    '</div>'
+  );
+
+  window._ag2CurrentTab = 'general';
+  window._ag2LabelFilter = null;
+}
+
+function _ag2ProgressText() {
+  var state      = window._agendaState;
+  var confirmed  = state.areas.filter(function(a) { return a.confirmed; }).length;
+  return confirmed + ' / ' + state.areas.length + ' area dikonfirmasi';
+}
+
+function _ag2ItemCountText() {
+  var state = window._agendaState;
+  var area  = state.areas[state.activeAreaIdx];
+  if (!area) return '';
+  var count = Object.values(area.selected).filter(Boolean).length;
+  return count + ' dari ' + area.checklist.length + ' item dipilih';
+}
+
+function _renderAg2Sidebar() {
+  var state = window._agendaState;
+  return state.areas.map(function(area, idx) {
+    var isActive    = idx === state.activeAreaIdx;
+    var isConfirmed = area.confirmed;
+    return '<div onclick="_ag2SelectArea(' + idx + ')" ' +
+      'style="display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:var(--radius-sm);cursor:pointer;margin-bottom:2px;' +
+        (isActive ? 'background:var(--blue);color:#fff' : 'background:transparent') + '">' +
+      '<div style="width:18px;height:18px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;' +
+        (isConfirmed
+          ? 'background:var(--emerald,#10b981);color:#fff'
+          : (isActive ? 'background:rgba(255,255,255,.25);color:#fff' : 'background:var(--border);color:var(--text-muted)')) + '">' +
+        (isConfirmed ? '✓' : (idx + 1)) +
+      '</div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' +
+          (isActive ? 'color:#fff' : '') + '">' + escHtml(area.dept) + '</div>' +
+        '<div style="font-size:10px;' + (isActive ? 'color:rgba(255,255,255,.7)' : 'color:var(--text-muted)') + '">' + escHtml(area.kategori) + '</div>' +
+      '</div>' +
+      (isConfirmed && !isActive ? '<i data-lucide="check-circle" style="width:13px;height:13px;color:var(--emerald,#10b981);flex-shrink:0"></i>' : '') +
+    '</div>';
+  }).join('');
+}
+
+function _renderAg2FilterBar() {
+  var state    = window._agendaState;
+  var area     = state.areas[state.activeAreaIdx];
+  if (!area) return '';
+  var checklist = area.checklist;
+  var general   = checklist.filter(function(i) { return i.tipe === 'GENERAL'; });
+  var khusus    = checklist.filter(function(i) { return i.tipe === 'KHUSUS'; });
+  var labelSet  = {};
+  checklist.forEach(function(item) {
+    if (item.labels) item.labels.split(',').forEach(function(l) {
+      var t = l.trim(); if (t) labelSet[t] = true;
+    });
+  });
+  var allLabels = Object.keys(labelSet).sort();
+  var curTab    = window._ag2CurrentTab || 'general';
+  var curLabel  = window._ag2LabelFilter;
+
+  var tabs =
+    '<button class="btn btn-sm ' + (curTab === 'general' ? 'btn-primary' : 'btn-outline') + '" ' +
+      'onclick="_ag2SetTab(\'general\')" style="font-size:11px">General (' + general.length + ')</button>' +
+    (khusus.length
+      ? '<button class="btn btn-sm ' + (curTab === 'khusus' ? 'btn-primary' : 'btn-outline') + '" ' +
+          'onclick="_ag2SetTab(\'khusus\')" style="font-size:11px">' + escHtml(area.kategori) + ' (' + khusus.length + ')</button>'
+      : '') +
+    (allLabels.length
+      ? '<span style="width:1px;background:var(--border);height:20px;margin:0 4px"></span>' +
+        allLabels.map(function(label) {
+          var isActive = curLabel === label;
+          return '<button class="btn btn-sm ' + (isActive ? 'btn-primary' : 'btn-ghost') + '" ' +
+            'onclick="_ag2ToggleLabel(\'' + escHtml(label).replace(/'/g,"\\'") + '\')" style="font-size:11px">' +
+            escHtml(label) + '</button>';
+        }).join('')
+      : '');
+
+  return tabs;
+}
+
+function _ag2SetTab(tab) {
+  window._ag2CurrentTab  = tab;
+  window._ag2LabelFilter = null;
+  _ag2RefreshPanel();
+  // Refresh filter bar active state
+  var bar = document.getElementById('ag2-filter-bar');
+  if (bar) { bar.innerHTML = _renderAg2FilterBar(); lucide.createIcons(); }
+}
+
+function _ag2ToggleLabel(label) {
+  window._ag2LabelFilter = (window._ag2LabelFilter === label) ? null : label;
+  _ag2RefreshPanel();
+  var bar = document.getElementById('ag2-filter-bar');
+  if (bar) { bar.innerHTML = _renderAg2FilterBar(); lucide.createIcons(); }
+}
+
+function _ag2SelectArea(idx) {
+  window._agendaState.activeAreaIdx = idx;
+  window._ag2CurrentTab  = 'general';
+  window._ag2LabelFilter = null;
+  // Refresh sidebar
+  var sb = document.getElementById('ag2-sidebar');
+  if (sb) { sb.innerHTML = _renderAg2Sidebar(); lucide.createIcons(); }
+  // Refresh filter bar
+  var bar = document.getElementById('ag2-filter-bar');
+  if (bar) { bar.innerHTML = _renderAg2FilterBar(); lucide.createIcons(); }
+  // Refresh panel
+  _ag2RefreshPanel();
+}
+
+function _ag2RefreshPanel() {
+  var panel = document.getElementById('ag2-checklist-panel');
+  if (panel) { panel.innerHTML = _renderAg2ChecklistPanel(); lucide.createIcons(); }
+  var cnt = document.getElementById('ag2-item-count');
+  if (cnt) cnt.textContent = _ag2ItemCountText();
+}
+
+function _renderAg2ChecklistPanel() {
+  var state    = window._agendaState;
+  var area     = state.areas[state.activeAreaIdx];
+  if (!area) return '<div class="empty-state" style="padding:60px"><div class="empty-desc">Pilih area di sidebar.</div></div>';
+
+  var tab      = window._ag2CurrentTab || 'general';
+  var labelF   = window._ag2LabelFilter;
+  var items    = area.checklist.filter(function(i) {
+    var matchTab = tab === 'general' ? i.tipe === 'GENERAL' : i.tipe === 'KHUSUS';
+    var matchLbl = !labelF || (i.labels && i.labels.split(',').map(function(l){ return l.trim(); }).includes(labelF));
+    return matchTab && matchLbl;
+  }).sort(function(a, b) { return Number(a.nomor) - Number(b.nomor); });
+
+  if (!items.length) return '<div style="padding:40px;text-align:center;color:var(--text-muted);font-size:13px">Tidak ada item.</div>';
+
+  // Group by persyaratan
+  var groups = [];
+  var groupMap = {};
+  items.forEach(function(item) {
+    var key = item.persyaratan;
+    if (!groupMap[key]) {
+      groupMap[key] = { persyaratan: key, aspek: item.aspek, items: [] };
+      groups.push(groupMap[key]);
+    }
+    groupMap[key].items.push(item);
+  });
+
+  var html = '';
+
+  groups.forEach(function(group) {
+    var groupItems   = group.items;
+    var allChk       = groupItems.every(function(i) { return area.selected[i.item_id]; });
+    var someChk      = groupItems.some(function(i)  { return area.selected[i.item_id]; });
+    var indeterminate = someChk && !allChk;
+    var groupId      = 'ag2-grp-' + escHtml(group.persyaratan).replace(/[^a-z0-9]/gi,'_').slice(0,20);
+
+    html +=
+      '<div style="margin-bottom:14px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden">' +
+        // Group header
+        '<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--bg);border-bottom:1px solid var(--border)">' +
+          '<input type="checkbox" id="' + groupId + '" ' +
+            (allChk ? 'checked' : '') + ' ' +
+            'style="width:15px;height:15px;accent-color:var(--blue);flex-shrink:0" ' +
+            'onchange="_ag2ToggleGroup(\'' + escHtml(group.persyaratan).replace(/'/g,"\\'") + '\',this.checked)" ' +
+            'onclick="this.indeterminate=false">' +
+          '<span class="badge badge-blue" style="font-size:10px">' + escHtml(group.aspek) + '</span>' +
+          '<span style="font-size:12px;font-weight:600;flex:1">' + escHtml(group.persyaratan) + '</span>' +
+          '<span style="font-size:11px;color:var(--text-muted)">' + groupItems.filter(function(i){ return area.selected[i.item_id]; }).length + '/' + groupItems.length + '</span>' +
+        '</div>' +
+        // Check items
+        groupItems.map(function(item) {
+          var isSelected  = !!area.selected[item.item_id];
+          var isHighlight = labelF && item.labels &&
+            item.labels.split(',').map(function(l){ return l.trim(); }).includes(labelF);
+          return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px;' +
+            (isHighlight ? 'background:rgba(245,158,11,.06)' : '') + ';' +
+            (!isSelected ? 'opacity:.5' : '') + '">' +
+            '<input type="checkbox" class="ag2-item-chk" value="' + escHtml(item.item_id) + '" ' +
+              (isSelected ? 'checked' : '') + ' ' +
+              'style="width:14px;height:14px;accent-color:var(--blue);flex-shrink:0;margin-top:2px" ' +
+              'onchange="_ag2ToggleItem(\'' + escHtml(item.item_id) + '\',this.checked)">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:13px;margin-bottom:3px">' + escHtml(item.check_item) + '</div>' +
+              (item.standar_check_item
+                ? '<div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">' +
+                    '<i data-lucide="info" style="width:10px;height:10px;vertical-align:middle"></i> ' + escHtml(item.standar_check_item) + '</div>'
+                : '') +
+              (item.labels
+                ? '<div>' + item.labels.split(',').map(function(l) {
+                    var t = l.trim();
+                    return '<span style="font-size:10px;padding:1px 6px;border-radius:8px;margin-right:2px;' +
+                      (t === labelF ? 'background:var(--amber,#f59e0b);color:#fff' : 'background:var(--bg);border:1px solid var(--border);color:var(--text-muted)') + '">' +
+                      escHtml(t) + '</span>';
+                  }).join('') + '</div>'
+                : '') +
+            '</div>' +
+          '</div>';
+        }).join('') +
+      '</div>';
+
+    // Set indeterminate after render
+    if (indeterminate) {
+      setTimeout(function() {
+        var el = document.getElementById(groupId);
+        if (el) el.indeterminate = true;
+      }, 0);
+    }
+  });
+
+  return html;
+}
+
+function _ag2ToggleItem(itemId, checked) {
+  var state = window._agendaState;
+  var area  = state.areas[state.activeAreaIdx];
+  if (!area) return;
+  area.selected[itemId] = checked;
+  area.confirmed = false; // reset konfirmasi kalau ada perubahan
+  var cnt = document.getElementById('ag2-item-count');
+  if (cnt) cnt.textContent = _ag2ItemCountText();
+  // Update group header count
+  _ag2RefreshGroupHeader(itemId);
+  // Update sidebar (status confirmed bisa berubah)
+  var sb = document.getElementById('ag2-sidebar');
+  if (sb) { sb.innerHTML = _renderAg2Sidebar(); lucide.createIcons(); }
+}
+
+function _ag2RefreshGroupHeader(itemId) {
+  // Re-render seluruh panel lebih simpel untuk sinkronisasi indeterminate
+  // Scroll position dipertahankan
+  var panel = document.getElementById('ag2-checklist-panel');
+  if (!panel) return;
+  var scrollTop = panel.scrollTop;
+  panel.innerHTML = _renderAg2ChecklistPanel();
+  panel.scrollTop = scrollTop;
+  lucide.createIcons();
+}
+
+function _ag2ToggleGroup(persyaratan, checked) {
+  var state = window._agendaState;
+  var area  = state.areas[state.activeAreaIdx];
+  if (!area) return;
+  area.checklist.forEach(function(item) {
+    if (item.persyaratan === persyaratan) area.selected[item.item_id] = checked;
+  });
+  area.confirmed = false;
+  _ag2RefreshPanel();
+  var sb = document.getElementById('ag2-sidebar');
+  if (sb) { sb.innerHTML = _renderAg2Sidebar(); lucide.createIcons(); }
+}
+
+function _ag2SelectAllVisible() {
+  var state  = window._agendaState;
+  var area   = state.areas[state.activeAreaIdx];
+  var tab    = window._ag2CurrentTab || 'general';
+  var labelF = window._ag2LabelFilter;
+  if (!area) return;
+  area.checklist.forEach(function(item) {
+    var matchTab = tab === 'general' ? item.tipe === 'GENERAL' : item.tipe === 'KHUSUS';
+    var matchLbl = !labelF || (item.labels && item.labels.split(',').map(function(l){ return l.trim(); }).includes(labelF));
+    if (matchTab && matchLbl) area.selected[item.item_id] = true;
+  });
+  area.confirmed = false;
+  _ag2RefreshPanel();
+  var sb = document.getElementById('ag2-sidebar');
+  if (sb) { sb.innerHTML = _renderAg2Sidebar(); lucide.createIcons(); }
+}
+
+function _ag2UnselectAllVisible() {
+  var state  = window._agendaState;
+  var area   = state.areas[state.activeAreaIdx];
+  var tab    = window._ag2CurrentTab || 'general';
+  var labelF = window._ag2LabelFilter;
+  if (!area) return;
+  area.checklist.forEach(function(item) {
+    var matchTab = tab === 'general' ? item.tipe === 'GENERAL' : item.tipe === 'KHUSUS';
+    var matchLbl = !labelF || (item.labels && item.labels.split(',').map(function(l){ return l.trim(); }).includes(labelF));
+    if (matchTab && matchLbl) area.selected[item.item_id] = false;
+  });
+  area.confirmed = false;
+  _ag2RefreshPanel();
+  var sb = document.getElementById('ag2-sidebar');
+  if (sb) { sb.innerHTML = _renderAg2Sidebar(); lucide.createIcons(); }
+}
+
+function _ag2ConfirmArea() {
+  var state = window._agendaState;
+  var area  = state.areas[state.activeAreaIdx];
+  if (!area) return;
+  var selectedCount = Object.values(area.selected).filter(Boolean).length;
+  if (selectedCount === 0) return toast('Pilih minimal 1 checklist item.', 'error');
+  area.confirmed = true;
+  // Update sidebar
+  var sb = document.getElementById('ag2-sidebar');
+  if (sb) { sb.innerHTML = _renderAg2Sidebar(); lucide.createIcons(); }
+  // Update progress text
+  var pt = document.getElementById('ag2-progress-text');
+  if (pt) pt.textContent = _ag2ProgressText();
+  // Auto-navigate ke area berikutnya yang belum dikonfirmasi
+  var nextIdx = state.areas.findIndex(function(a, i) { return i > state.activeAreaIdx && !a.confirmed; });
+  if (nextIdx === -1) nextIdx = state.areas.findIndex(function(a) { return !a.confirmed; });
+  if (nextIdx !== -1 && nextIdx !== state.activeAreaIdx) {
+    _ag2SelectArea(nextIdx);
+  } else {
+    toast('Area dikonfirmasi ✓', 'success');
+  }
+}
+
+function _agendaStep2Next() {
+  var state    = window._agendaState;
+  var unconfirmed = state.areas.filter(function(a) { return !a.confirmed; });
+  if (unconfirmed.length > 0) {
+    toast(unconfirmed.length + ' area belum dikonfirmasi.', 'error');
+    // Navigate ke area yang belum dikonfirmasi
+    var idx = state.areas.indexOf(unconfirmed[0]);
+    _ag2SelectArea(idx);
+    return;
+  }
+  _renderAgendaStep3();
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  STEP 3 — Preview & Simpan
+// ════════════════════════════════════════════════════════════
+
+function _renderAgendaStep3() {
+  var state    = window._agendaState;
+  var auditors = window._agendaAllAuditors || [];
+
+  var summaryCards = state.areas.map(function(area, idx) {
+    var selectedItems = area.checklist.filter(function(i) { return area.selected[i.item_id]; });
+    var general       = selectedItems.filter(function(i) { return i.tipe === 'GENERAL'; });
+    var khusus        = selectedItems.filter(function(i) { return i.tipe === 'KHUSUS'; });
+    var leadUser      = auditors.find(function(u) { return u.email === area.leadAuditor; });
+
+    var detailId = 'ag3-detail-' + idx;
+    var auditorHtml = area.auditorEmails.map(function(e) {
+      var u      = auditors.find(function(x) { return x.email === e; });
+      var nama   = u ? u.nama.split(' ')[0] : e.split('@')[0];
+      var isLead = e === area.leadAuditor;
+      return '<span style="display:inline-flex;align-items:center;gap:3px;' +
+        'padding:2px 8px;border-radius:12px;font-size:11px;' +
+        'background:' + (isLead ? 'rgba(59,130,246,.1)' : 'var(--bg)') + ';' +
+        'border:1px solid ' + (isLead ? 'var(--blue,#3b82f6)' : 'var(--border)') + ';' +
+        'color:' + (isLead ? 'var(--blue,#3b82f6)' : 'var(--text-muted)') + ';' +
+        'font-weight:' + (isLead ? '600' : '400') + '">' +
+        (isLead ? '<span style="font-size:9px;font-weight:700;margin-right:2px">LEAD</span>' : '') +
+        escHtml(nama) +
+      '</span>';
+    }).join(' ');
+
+    return '<div style="border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden;background:var(--surface)">' +
+      // Card header — klik untuk expand
+      '<div style="padding:12px 16px;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="_ag3ToggleDetail(' + idx + ')">' +
+        // Chevron
+        '<div id="ag3-chevron-' + idx + '" style="flex-shrink:0;color:var(--text-muted);transition:transform .2s">' +
+          '<i data-lucide="chevron-right" style="width:14px;height:14px"></i>' +
+        '</div>' +
+        // Nomor
+        '<div style="width:24px;height:24px;border-radius:50%;background:var(--blue,#3b82f6);color:#fff;' +
+          'display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0">' +
+          (idx + 1) +
+        '</div>' +
+        // Info utama
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+            '<span class="badge badge-blue" style="font-size:10px">' + escHtml(area.kategori) + '</span>' +
+            '<span style="font-weight:700;font-size:13px">' + escHtml(area.dept) + '</span>' +
+          '</div>' +
+          '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">' +
+            '<div style="display:flex;align-items:center;gap:5px">' +
+              '<i data-lucide="users" style="width:11px;height:11px;color:var(--text-muted)"></i>' +
+              auditorHtml +
+            '</div>' +
+            '<div style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted)">' +
+              '<i data-lucide="clipboard-list" style="width:11px;height:11px"></i>' +
+              '<span>' + selectedItems.length + ' item</span>' +
+              (general.length ? '<span style="color:var(--border)">·</span><span>' + general.length + ' general</span>' : '') +
+              (khusus.length  ? '<span style="color:var(--border)">·</span><span>' + khusus.length  + ' khusus</span>'  : '') +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        // Status badge
+        '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;' +
+          'background:rgba(16,185,129,.1);color:var(--emerald,#10b981);font-size:11px;font-weight:600;flex-shrink:0">' +
+          '<i data-lucide="check" style="width:11px;height:11px"></i> Siap' +
+        '</span>' +
+      '</div>' +
+      // Detail — collapsible
+      '<div id="' + detailId + '" style="display:none;border-top:1px solid var(--border);padding:12px 16px 16px;background:var(--bg)">' +
+        _ag3DetailHtml(area, general, khusus) +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  _openFullscreen('agenda-fullscreen',
+    // Header
+    '<div style="padding:14px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;flex-shrink:0;background:var(--surface)">' +
+      '<button class="btn btn-ghost btn-icon" onclick="_renderAgendaStep2()">' +
+        '<i data-lucide="arrow-left" style="width:16px;height:16px"></i>' +
+      '</button>' +
+      '<div>' +
+        '<div style="font-weight:700;font-size:15px">Buat Audit Plan</div>' +
+        '<div style="font-size:11px;color:var(--text-muted)">Langkah 3 dari 3 — Preview & Simpan</div>' +
+      '</div>' +
+      '<div style="margin-left:auto">' + _stepIndicator(3) + '</div>' +
+    '</div>' +
+
+    // Body
+    '<div style="flex:1;overflow-y:auto;padding:24px 32px;background:var(--bg)">' +
+      '<div style="max-width:800px;margin:0 auto">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+          '<div>' +
+            '<div style="font-size:13px;font-weight:600">' + state.areas.length + ' Area akan dibuat audit plan</div>' +
+            '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Klik tiap area untuk lihat detail checklist</div>' +
+          '</div>' +
+        '</div>' +
+        summaryCards +
+      '</div>' +
+    '</div>' +
+
+    // Footer
+    '<div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:var(--surface)">' +
+      '<button class="btn btn-outline" onclick="_renderAgendaStep2()">Kembali & Edit</button>' +
+      '<button class="btn btn-primary" id="ag-save-btn" onclick="singleClick(this,function(){ _saveAgenda() })">' +
+        '<i data-lucide="save" style="width:14px;height:14px"></i> Simpan ' + state.areas.length + ' Audit Plan' +
+      '</button>' +
+    '</div>'
+  );
+}
+
+function _ag3DetailHtml(area, general, khusus) {
+  function renderGroup(items, label) {
+    if (!items.length) return '';
+    var lastPersyaratan = null;
+    var rows = items.map(function(item) {
+      var isNew = item.persyaratan !== lastPersyaratan;
+      lastPersyaratan = item.persyaratan;
+      return '<tr style="' + (isNew && lastPersyaratan !== null ? 'border-top:2px solid var(--border)' : '') + '">' +
+        '<td style="width:36px;text-align:center;color:var(--text-muted);font-size:11px">' + item.nomor + '</td>' +
+        '<td style="width:70px">' + (isNew ? '<span class="badge badge-blue" style="font-size:10px">' + escHtml(item.aspek) + '</span>' : '') + '</td>' +
+        '<td style="font-size:11px;color:var(--text-muted);width:180px">' + (isNew ? escHtml(item.persyaratan) : '') + '</td>' +
+        '<td style="font-size:12px">' + escHtml(item.check_item) + '</td>' +
+      '</tr>';
+    }).join('');
+    return '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:6px">' + label + '</div>' +
+      '<div class="table-wrap"><table><thead><tr>' +
+        '<th style="width:36px">No</th><th style="width:70px">Aspek</th><th style="width:180px">Persyaratan</th><th>Check Item</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+  }
+  return renderGroup(general, 'General') + renderGroup(khusus, escHtml(area.kategori));
+}
+
+function _ag3ToggleDetail(idx) {
+  var detailEl  = document.getElementById('ag3-detail-' + idx);
+  var chevronEl = document.getElementById('ag3-chevron-' + idx);
+  if (!detailEl) return;
+  var isOpen = detailEl.style.display !== 'none';
+  detailEl.style.display  = isOpen ? 'none' : '';
+  if (chevronEl) chevronEl.style.transform = isOpen ? '' : 'rotate(90deg)';
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  SAVE
+// ════════════════════════════════════════════════════════════
+
+async function _saveAgenda() {
+  var btn   = document.getElementById('ag-save-btn');
+  var state = window._agendaState;
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:13px;height:13px;border-width:2px"></div> Menyimpan...';
+
+  var savedCount  = 0;
+  var failedAreas = [];
+
+  for (var i = 0; i < state.areas.length; i++) {
+    var area       = state.areas[i];
+    var selectedIds = Object.keys(area.selected).filter(function(id) { return area.selected[id]; });
+    try {
+      var result = await api('CREATE_AGENDA', {
+        period_id:      state.periodId,
+        area_id:        area.area_id,
+        auditor_emails: area.auditorEmails.join(','),
+        lead_auditor:   area.leadAuditor,
+        jadwal_tanggal: '',
+        item_ids:       selectedIds,
+      });
+      savedCount++;
+    } catch(err) {
+      failedAreas.push({ dept: area.dept, reason: err.message });
+    }
+  }
+
+  clearCache('GET_AGENDAS_BY_PERIOD');
+
+  if (failedAreas.length === 0) {
+    toast(savedCount + ' audit plan berhasil disimpan!', 'success');
+  } else {
+    toast(savedCount + ' berhasil, ' + failedAreas.length + ' gagal: ' + failedAreas.map(function(f) { return f.dept; }).join(', '), 'error');
+  }
+
+  _closeFullscreen('agenda-fullscreen');
+  var _pid = state.periodId;
+  _togglePeriodExpand(_pid, '');
+  _togglePeriodExpand(_pid, '');
+}
+
+// ── BULK IMPORT AREAS ────────────────────────────────────────
+
+function openBulkAreaModal() {
+  createModal({
+    id:   'bulk-area-modal',
+    title: 'Import Banyak Area Sekaligus',
+    size: 'modal-lg',
+    body:
+      '<div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12px;margin-bottom:14px;align-items:start">' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Urutan kolom</span>' +
+        '<span style="font-family:monospace;font-size:12px">' +
+          'Kategori &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Nama Dept &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Nama Dept Head &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          'Area Sampling &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          '<span style="color:var(--rose)">Nama Auditee *</span>' +
+        '</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Kategori valid</span>' +
+        '<span style="font-size:12px">Office &nbsp;·&nbsp; Laboratorium &nbsp;·&nbsp; Maintenance &nbsp;·&nbsp; Produksi &nbsp;·&nbsp; Gudang</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Auditee &gt; 1</span>' +
+        '<span style="font-size:12px">Pisah koma. Email dibuat otomatis dari nama.</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Format</span>' +
+        '<span style="font-size:12px">Paste langsung dari Excel (tab), atau ketik manual (koma).</span>' +
+      '</div>' +
+      '<textarea class="form-control" id="bulk-area-input" rows="10" ' +
+        'placeholder="Produksi, CRM, Annang Nugroho, Mixing & Packing, Masud Asadullah, Irdam Cahyo Puristyan&#10;Office, IMS, Retno Wita, BPM & EHS, Roni Permana, Florean Salsabila Irdana" ' +
+        'style="font-family:monospace;font-size:13px;resize:vertical"></textarea>' +
+      '<div id="bulk-area-preview" style="margin-top:12px"></div>',
+    footer:
+      '<span id="bulk-area-count" style="font-size:12px;color:var(--text-muted);margin-right:auto"></span>' +
+      '<button class="btn btn-outline" onclick="closeModal(\'bulk-area-modal\')">Batal</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="previewBulkAreas()">Preview</button>' +
+      '<button class="btn btn-primary" id="bulk-area-save-btn" onclick="singleClick(this,function(){ saveBulkAreas() })">Import Semua</button>',
+  });
+  var ta = document.getElementById('bulk-area-input');
+  if (ta) ta.addEventListener('input', function() {
+    var lines = ta.value.split('\n').filter(function(l) { return l.trim(); }).length;
+    var el = document.getElementById('bulk-area-count');
+    if (el) el.textContent = lines + ' area akan ditambahkan';
+  });
+}
+function _parseBulkAreaLines() {
+  var ta = document.getElementById('bulk-area-input');
+  if (!ta) return [];
+
+  var raw  = ta.value;
+  var rows = [];
+  var i    = 0;
+
+  while (i < raw.length) {
+    var cols = [];
+    while (i < raw.length) {
+      if (raw[i] === '"') {
+        i++;
+        var val = '';
+        while (i < raw.length) {
+          if (raw[i] === '"' && raw[i+1] === '"') { val += '"'; i += 2; }
+          else if (raw[i] === '"') { i++; break; }
+          else { val += raw[i++]; }
+        }
+        cols.push(val.trim());
+      } else {
+        var val = '';
+        while (i < raw.length && raw[i] !== '\t' && raw[i] !== '\n' && raw[i] !== '\r') {
+          val += raw[i++];
+        }
+        cols.push(val.trim());
+      }
+      if (i < raw.length && raw[i] === '\t') { i++; continue; }
+      if (i < raw.length && (raw[i] === '\n' || raw[i] === '\r')) {
+        if (raw[i] === '\r' && raw[i+1] === '\n') i++;
+        i++;
+      }
+      break;
+    }
+
+    if (cols.length === 0 || cols.every(function(c) { return !c; })) continue;
+
+    // cols[0]=kategori, cols[1]=dept, cols[2]=nama dept head, cols[3]=area sampling, cols[4]=nama auditee(s)
+    var deptHeadName    = (cols[2] || '').trim();
+    var auditeeNamesRaw = cols.slice(4).join('\n');
+
+    // Convert newline-separated names in auditee cell
+    var auditeeNamesList = auditeeNamesRaw.split(/[\n,]+/)
+      .map(function(n) { return n.trim(); })
+      .filter(Boolean);
+
+    // Strip dept head dari auditee jika sama
+    var deptHeadEmail = nameToEmail(deptHeadName);
+    auditeeNamesList = auditeeNamesList.filter(function(n) {
+      return nameToEmail(n) !== deptHeadEmail;
+    });
+
+    rows.push({
+      kategori:        cols[0] || '',
+      dept:            cols[1] || '',
+      dept_head_name:  deptHeadName,
+      dept_head_email: deptHeadEmail,
+      area_sampling:   (cols[3] || '').trim(),
+      auditee_names:   auditeeNamesList.join('\n'),
+      auditee_emails:  auditeeNamesList.map(nameToEmail).join(','),
+    });
+  }
+
+  return rows;
+}
+
+function previewBulkAreas() {
+  var items   = _parseBulkAreaLines();
+  var preview = document.getElementById('bulk-area-preview');
+  if (!preview) return;
+  if (!items.length) { preview.innerHTML = ''; return; }
+  var rows = items.map(function(a, i) {
+    var warn = '';
+    if (!a.dept || !a.dept_head_name) warn = '⚠ dept/nama dept head kosong';
+    else if (!a.auditee_names) warn = '⚠ auditee wajib diisi';
+    var validCats = ['Office','Laboratorium','Maintenance','Produksi','Gudang'];
+    if (a.kategori && !validCats.includes(a.kategori)) warn = '⚠ kategori tidak valid';
+    var auditeePreview = a.auditee_names
+      ? a.auditee_names.split('\n').map(function(n) {
+          return '<div style="font-size:10px;color:var(--text-muted)">' + escHtml(nameToEmail(n)) + '</div>';
+        }).join('')
+      : '—';
+    return '<tr style="font-size:12px' + (warn ? ';color:var(--rose)' : '') + '">' +
+      '<td style="padding:4px 8px;color:var(--text-muted)">' + (i+1) + '</td>' +
+      '<td style="padding:4px 8px">' + escHtml(a.kategori) + '</td>' +
+      '<td style="padding:4px 8px"><strong>' + escHtml(a.dept) + '</strong></td>' +
+      '<td style="padding:4px 8px">' +
+        escHtml(a.dept_head_name) +
+        '<div style="font-size:10px;color:var(--text-muted)">' + escHtml(a.dept_head_email) + '</div>' +
+      '</td>' +
+      '<td style="padding:4px 8px;color:var(--text-muted)">' + escHtml(a.area_sampling || '—') + '</td>' +
+      '<td style="padding:4px 8px">' + auditeePreview + '</td>' +
+      '<td style="padding:4px 8px;color:var(--rose);font-size:11px">' + warn + '</td>' +
+    '</tr>';
+  }).join('');
+  preview.innerHTML =
+    '<div style="font-size:12px;font-weight:600;margin-bottom:6px">' + items.length + ' area akan diproses:</div>' +
+    '<div style="overflow-x:auto;max-height:240px;overflow-y:auto">' +
+      '<table style="width:100%;border-collapse:collapse">' +
+        '<thead><tr style="font-size:11px;color:var(--text-muted);background:var(--bg)">' +
+          '<th style="padding:4px 8px">#</th>' +
+          '<th style="padding:4px 8px">Kategori</th>' +
+          '<th style="padding:4px 8px">Dept</th>' +
+          '<th style="padding:4px 8px">Dept Head</th>' +
+          '<th style="padding:4px 8px">Area Sampling</th>' +
+          '<th style="padding:4px 8px">Auditee (email)</th>' +
+          '<th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
+}
+
+async function saveBulkAreas() {
+  var items = _parseBulkAreaLines();
+  if (!items.length) return toast('Tidak ada data untuk diimport.', 'error');
+  var btn     = document.getElementById('bulk-area-save-btn');
+  var restore = btnLoading(btn, 'Mengimport...', 'bulk-area-modal');
+  try {
+    var result = await api('BATCH_CREATE_AREAS', { items: items });
+    clearCache('GET_AREAS');
+    var msg = result.created + ' area berhasil ditambahkan.';
+    if (result.skipped && result.skipped.length) {
+      msg += ' ' + result.skipped.length + ' gagal: ' + result.skipped.map(function(s) { return s.dept + ' (' + s.reason + ')'; }).join(', ');
+    }
+    toast(msg, result.created > 0 ? 'success' : 'error');
+    closeModal('bulk-area-modal');
+    loadAdminAreas(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+// ── BULK IMPORT USERS ────────────────────────────────────────
+
+function openBulkUserModal() {
+  createModal({
+    id:   'bulk-user-modal',
+    title: 'Import Banyak User Sekaligus',
+    size: 'modal-lg',
+    body:
+      '<div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12px;margin-bottom:14px;align-items:start">' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Urutan kolom</span>' +
+        '<span style="font-family:monospace;font-size:12px">' +
+          'Nama Lengkap &nbsp;<span style="color:var(--border)">|</span>&nbsp; ' +
+          '<span style="color:var(--rose)">Roles *</span>' +
+        '</span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Roles valid</span>' +
+        '<span style="font-size:12px">Koordinator &nbsp;·&nbsp; Auditor &nbsp;·&nbsp; kombinasi pisah <code style="background:var(--bg);padding:1px 5px;border-radius:3px">|</code></span>' +
+        '<span style="color:var(--text-muted);white-space:nowrap">Format</span>' +
+        '<span style="font-size:12px">Paste dari Excel (tab) atau ketik manual (koma). Email dibuat otomatis dari nama.</span>' +
+      '</div>' +
+      '<textarea class="form-control" id="bulk-user-input" rows="10" ' +
+        'placeholder="Florean Salsabila Irdana, Koordinator&#10;Roni Permana, Auditor&#10;Annang Nugroho, Auditor|Koordinator" ' +
+        'style="font-family:monospace;font-size:13px;resize:vertical"></textarea>' +
+      '<div id="bulk-user-preview" style="margin-top:12px"></div>',
+    footer:
+      '<span id="bulk-user-count" style="font-size:12px;color:var(--text-muted);margin-right:auto"></span>' +
+      '<button class="btn btn-outline" onclick="closeModal(\'bulk-user-modal\')">Batal</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="previewBulkUsers()">Preview</button>' +
+      '<button class="btn btn-primary" id="bulk-user-save-btn" onclick="singleClick(this,function(){ saveBulkUsers() })">Import Semua</button>',
+  });
+  var ta = document.getElementById('bulk-user-input');
+  if (ta) ta.addEventListener('input', function() {
+    var lines = ta.value.split('\n').filter(function(l) { return l.trim(); }).length;
+    var el = document.getElementById('bulk-user-count');
+    if (el) el.textContent = lines + ' user akan ditambahkan';
+  });
+}
+
+function _parseBulkUserLines() {
+  var ta = document.getElementById('bulk-user-input');
+  if (!ta) return [];
+  return ta.value.split('\n')
+    .map(function(line) { return line.trim(); })
+    .filter(Boolean)
+    .map(function(line) {
+      var sep      = line.includes('\t') ? '\t' : ',';
+      var parts    = line.split(sep).map(function(p) { return p.trim(); });
+      var nama     = parts[0] || '';
+      var rawRoles = (parts[1] || '').replace(/\|/g, ',');
+      return {
+        nama:  nama,
+        email: nameToEmail(nama),
+        roles: rawRoles,
+      };
+    });
+}
+
+function previewBulkUsers() {
+  var items   = _parseBulkUserLines();
+  var preview = document.getElementById('bulk-user-preview');
+  if (!preview) return;
+  if (!items.length) { preview.innerHTML = ''; return; }
+  var validRoles = ['Koordinator', 'Auditor'];
+  var rows = items.map(function(u, i) {
+    var warn = '';
+    if (!u.nama) warn = '⚠ nama kosong';
+    else {
+      var rArr = u.roles.split(',').map(function(r) { return r.trim(); }).filter(Boolean);
+      if (rArr.length === 0) warn = '⚠ roles kosong';
+      else {
+        var invalid = rArr.find(function(r) { return !validRoles.includes(r); });
+        if (invalid) warn = '⚠ role "' + invalid + '" tidak valid';
+      }
+    }
+    var badgeStyle = 'display:inline-block;font-size:10px;padding:1px 6px;border-radius:10px;background:var(--bg);border:1px solid var(--border);margin-right:2px';
+    var rolesBadges = u.roles.split(',').map(function(r) {
+      return '<span style="' + badgeStyle + '">' + escHtml(r.trim()) + '</span>';
+    }).join('');
+    return '<tr style="font-size:12px' + (warn ? ';color:var(--rose)' : '') + '">' +
+      '<td style="padding:4px 8px;color:var(--text-muted)">' + (i+1) + '</td>' +
+      '<td style="padding:4px 8px"><strong>' + escHtml(u.nama) + '</strong></td>' +
+      '<td style="padding:4px 8px;font-family:monospace;font-size:11px;color:var(--text-muted)">→ ' + escHtml(u.email) + '</td>' +
+      '<td style="padding:4px 8px">' + rolesBadges + '</td>' +
+      '<td style="padding:4px 8px;color:var(--rose);font-size:11px">' + warn + '</td>' +
+    '</tr>';
+  }).join('');
+  preview.innerHTML =
+    '<div style="font-size:12px;font-weight:600;margin-bottom:6px">' + items.length + ' user akan diproses:</div>' +
+    '<div style="overflow-x:auto;max-height:200px;overflow-y:auto">' +
+      '<table style="width:100%;border-collapse:collapse">' +
+        '<thead><tr style="font-size:11px;color:var(--text-muted);background:var(--bg)">' +
+          '<th style="padding:4px 8px">#</th><th style="padding:4px 8px">Nama</th>' +
+          '<th style="padding:4px 8px">Email</th><th style="padding:4px 8px">Roles</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
+}
+
+async function saveBulkUsers() {
+  var items = _parseBulkUserLines();
+  if (!items.length) return toast('Tidak ada data untuk diimport.', 'error');
+  var btn     = document.getElementById('bulk-user-save-btn');
+  var restore = btnLoading(btn, 'Mengimport...', 'bulk-user-modal');
+  try {
+    var result = await api('BATCH_CREATE_USERS', { items: items });
+    clearCache('GET_USERS');
+    var msg = result.created + ' user berhasil ditambahkan.';
+    if (result.skipped && result.skipped.length) {
+      msg += ' ' + result.skipped.length + ' gagal: ' + result.skipped.map(function(s) { return s.email + ' (' + s.reason + ')'; }).join(', ');
+    }
+    toast(msg, result.created > 0 ? 'success' : 'error');
+    closeModal('bulk-user-modal');
+    loadAdminUsers(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+function _showSkipReport(previewId, skipped, keyField) {
+  var el = document.getElementById(previewId);
+  if (!el) return;
+  var rows = skipped.map(function(s) {
+    return '<tr style="font-size:12px">' +
+      '<td style="padding:4px 8px;color:var(--text-muted)">' + escHtml(s[keyField]) + '</td>' +
+      '<td style="padding:4px 8px;color:var(--rose)">' + escHtml(s.reason) + '</td>' +
+    '</tr>';
+  }).join('');
+  el.innerHTML =
+    '<div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--rose)">' +
+      skipped.length + ' baris dilewati:' +
+    '</div>' +
+    '<div style="overflow-x:auto;max-height:160px;overflow-y:auto">' +
+      '<table style="width:100%;border-collapse:collapse">' +
+        '<thead><tr style="font-size:11px;color:var(--text-muted);background:var(--bg)">' +
+          '<th style="padding:4px 8px">' + keyField + '</th>' +
+          '<th style="padding:4px 8px">Alasan</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>' +
+    '<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">' +
+      'Perbaiki baris di atas lalu klik <strong>Import Semua</strong> lagi. ' +
+      'Baris yang sudah berhasil <strong>tidak</strong> akan diduplikasi.' +
+    '</div>';
+}
+
+// ── Checkbox helpers: Users ───────────────────────────────────
+
+function _attachUserCheckboxListeners() {
+  document.querySelectorAll('.user-chk').forEach(function(chk) {
+    chk.addEventListener('change', _updateUserDeleteBtn);
+  });
+}
+
+function toggleUserDeleteMode() {
+  var col = document.getElementById('user-chk-col');
+  if (!col) return;
+  var active = col.style.display === 'none';
+  col.style.display = active ? '' : 'none';
+  document.querySelectorAll('.user-chk-cell').forEach(function(td) { td.style.display = active ? '' : 'none'; });
+  var btn = document.getElementById('user-aksi-btn');
+  if (btn) btn.style.color = active ? 'var(--rose)' : '';
+  if (!active) {
+    document.querySelectorAll('.user-chk').forEach(function(c) { c.checked = false; });
+    var all = document.getElementById('user-chk-all');
+    if (all) { all.checked = false; all.indeterminate = false; }
+    _updateUserDeleteBtn();
+  }
+}
+
+function toggleAreaDeleteMode() {
+  var col = document.getElementById('area-chk-col');
+  if (!col) return;
+  var active = col.style.display === 'none';
+  col.style.display = active ? '' : 'none';
+  document.querySelectorAll('.area-chk-cell').forEach(function(td) { td.style.display = active ? '' : 'none'; });
+  var btn = document.getElementById('area-aksi-btn');
+  if (btn) btn.style.color = active ? 'var(--rose)' : '';
+  if (!active) {
+    document.querySelectorAll('.area-chk').forEach(function(c) { c.checked = false; });
+    var all = document.getElementById('area-chk-all');
+    if (all) { all.checked = false; all.indeterminate = false; }
+    _updateAreaDeleteBtn();
+  }
+}
+
+function toggleAllUserCheckboxes(masterChk) {
+  document.querySelectorAll('.user-chk').forEach(function(chk) { chk.checked = masterChk.checked; });
+  _updateUserDeleteBtn();
+}
+
+function _updateUserDeleteBtn() {
+  var checked = document.querySelectorAll('.user-chk:checked').length;
+  var btn     = document.getElementById('user-delete-selected-btn');
+  var count   = document.getElementById('user-selected-count');
+  if (btn)   btn.style.display   = checked > 0 ? '' : 'none';
+  if (count) count.textContent   = checked;
+  var all = document.getElementById('user-chk-all');
+  if (all) all.indeterminate = checked > 0 && checked < document.querySelectorAll('.user-chk').length;
+}
+
+async function batchDeleteSelectedUsers() {
+  var emails = Array.from(document.querySelectorAll('.user-chk:checked')).map(function(c) { return c.value; });
+  if (!emails.length) return;
+  var ok = await showConfirm({
+    title: 'Hapus ' + emails.length + ' User',
+    message: 'Hapus ' + emails.length + ' user sekaligus?',
+    detail: 'Tindakan ini permanen. Data sessions dan findings tidak ikut terhapus.',
+    confirmText: 'Hapus Semua',
+    danger: true,
+  });
+  if (!ok) return;
+  var btn     = document.getElementById('user-delete-selected-btn');
+  var restore = btnLoading(btn, 'Menghapus...', 'admin-tab-content');
+  try {
+    var result = await api('BATCH_DELETE_USERS', { emails: emails });
+    clearCache('GET_USERS');
+    var msg = result.deleted + ' user berhasil dihapus.';
+    if (result.skipped && result.skipped.length) msg += ' ' + result.skipped.length + ' gagal.';
+    toast(msg, result.deleted > 0 ? 'success' : 'error');
+    loadAdminUsers(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+
+// ── Checkbox helpers: Areas ───────────────────────────────────
+
+function _attachAreaCheckboxListeners() {
+  document.querySelectorAll('.area-chk').forEach(function(chk) {
+    chk.addEventListener('change', _updateAreaDeleteBtn);
+  });
+}
+
+function toggleAllAreaCheckboxes(masterChk) {
+  document.querySelectorAll('.area-chk').forEach(function(chk) { chk.checked = masterChk.checked; });
+  _updateAreaDeleteBtn();
+}
+
+function _updateAreaDeleteBtn() {
+  var checked = document.querySelectorAll('.area-chk:checked').length;
+  var btn     = document.getElementById('area-delete-selected-btn');
+  var count   = document.getElementById('area-selected-count');
+  if (btn)   btn.style.display = checked > 0 ? '' : 'none';
+  if (count) count.textContent = checked;
+  var all = document.getElementById('area-chk-all');
+  if (all) all.indeterminate = checked > 0 && checked < document.querySelectorAll('.area-chk').length;
+}
+
+async function batchDeleteSelectedAreas() {
+  var areaIds = Array.from(document.querySelectorAll('.area-chk:checked')).map(function(c) { return c.value; });
+  if (!areaIds.length) return;
+  var ok = await showConfirm({
+    title: 'Hapus ' + areaIds.length + ' Area',
+    message: 'Hapus ' + areaIds.length + ' area sekaligus?',
+    detail: 'Pastikan tidak ada agenda aktif yang mengacu ke area-area ini.',
+    confirmText: 'Hapus Semua',
+    danger: true,
+  });
+  if (!ok) return;
+  var btn     = document.getElementById('area-delete-selected-btn');
+  var restore = btnLoading(btn, 'Menghapus...', 'admin-tab-content');
+  try {
+    var result = await api('BATCH_DELETE_AREAS', { area_ids: areaIds });
+    clearCache('GET_AREAS');
+    var msg = result.deleted + ' area berhasil dihapus.';
+    if (result.skipped && result.skipped.length) msg += ' ' + result.skipped.length + ' gagal.';
+    toast(msg, result.deleted > 0 ? 'success' : 'error');
+    loadAdminAreas(document.getElementById('admin-tab-content'));
+  } catch(err) { toast(err.message, 'error'); restore(); }
+}
+
+</script>
