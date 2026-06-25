@@ -1,0 +1,1787 @@
+<script>
+// ============================================================
+//  Page_MyTask.html
+//  Semua task yang perlu ditindaklanjuti user
+// ============================================================
+
+Pages['mytask'] = async function(container) {
+  container.innerHTML =
+    '<div class="page-loader"><div class="spinner dark"></div><span>Memuat tugas...</span></div>';
+
+  var period = App.activePeriod;
+  if (!period) {
+    container.innerHTML =
+      '<div class="empty-state">' +
+        '<i data-lucide="calendar-off" style="width:48px;height:48px;opacity:.3;margin-bottom:16px"></i>' +
+        '<div class="empty-title">Tidak Ada Periode Aktif</div>' +
+        '<div class="empty-desc">My Task hanya tersedia saat periode audit aktif.</div>' +
+      '</div>';
+    lucide.createIcons();
+    return;
+  }
+
+  try {
+    var results  = await Promise.all([
+      cachedApi('GET_AGENDAS_BY_PERIOD',     { period_id: period.period_id }, 30),
+      cachedApi('GET_ALL_FINDINGS_BY_PERIOD', { period_id: period.period_id }, 15),
+    ]);
+    var agendas  = results[0];
+    var findings = results[1];
+
+    findings.forEach(function(f) {
+      f._agenda = agendas.find(function(a) { return a.agenda_id === f.agenda_id; });
+    });
+
+    var tasks = await _buildTaskList(findings, agendas, period);
+
+    _renderMyTask(container, tasks, period);
+  } catch(err) {
+    container.innerHTML =
+      '<div class="empty-state">' +
+        '<i data-lucide="alert-triangle" style="width:48px;height:48px;opacity:.3;margin-bottom:16px"></i>' +
+        '<div class="empty-title">Gagal Memuat</div>' +
+        '<div class="empty-desc">' + escHtml(err.message) + '</div>' +
+      '</div>';
+    lucide.createIcons();
+  }
+};
+
+// ── Build task list ───────────────────────────────────────────
+
+async function _buildTaskList(findings, agendas, period) {
+  var p     = App.profile || {};
+  var tasks = [];
+
+  // ── 1. VERIFIKASI TEMUAN (Koordinator) ───────────────────
+  if (p.isKoordinator) {
+    var pendingVerif = {};
+    findings
+      .filter(function(f) {
+        return f.finding_status === 'PENDING_VERIFICATION';
+      })
+      .forEach(function(f) {
+        var aid = f.agenda_id;
+        if (!pendingVerif[aid]) {
+          pendingVerif[aid] = {
+            type:       'VERIFIKASI',
+            badge:      'badge-amber',
+            label:      'Verifikasi Temuan',
+            agenda:     f._agenda,
+            agenda_id:  aid,
+            period_id:  period.period_id,
+            findings:   [],
+            icon:       'shield-check',
+          };
+        }
+        pendingVerif[aid].findings.push(f);
+      });
+    Object.values(pendingVerif).forEach(function(t) { tasks.push(t); });
+  }
+
+  // ── 2. ISI TPP (Auditee — DeptHead dikecualikan) ─────────
+  if (p.isAuditee && !p.isDeptHead) {
+    findings
+      .filter(function(f) {
+        return f.finding_status === 'OPEN' &&
+          f._agenda && _isAuditeeOf(f._agenda, p.email);
+      })
+      .forEach(function(f) {
+        tasks.push({
+          type:       'ISI_TPP',
+          badge:      'badge-blue',
+          label:      'Isi TPP',
+          agenda:     f._agenda,
+          agenda_id:  f.agenda_id,
+          period_id:  period.period_id,
+          finding:    f,
+          result_id:  f.result_id,
+          icon:       'wrench',
+          desc:       '#' + f.nomor_persyaratan + '.' + f.check_item_no +
+                      ' · ' + escHtml(f._agenda ? f._agenda.dept : ''),
+        });
+      });
+  }
+
+  // ── 3. UPLOAD IMPLEMENTASI (Auditee — DeptHead dikecualikan) ─────────────
+  if (p.isAuditee && !p.isDeptHead) {
+    findings
+      .filter(function(f) {
+        return f.finding_status === 'OPEN_IMPL' &&
+          f._agenda && _isAuditeeOf(f._agenda, p.email);
+      })
+      .forEach(function(f) {
+        tasks.push({
+          type:       'UPLOAD_IMPL',
+          badge:      'badge-purple',
+          label:      'Upload Implementasi',
+          agenda:     f._agenda,
+          agenda_id:  f.agenda_id,
+          period_id:  period.period_id,
+          finding:    f,
+          result_id:  f.result_id,
+          icon:       'camera',
+          desc:       '#' + f.nomor_persyaratan + '.' + f.check_item_no +
+                      ' · ' + escHtml(f._agenda ? f._agenda.dept : ''),
+        });
+      });
+  }
+
+// ── 4 & 5. APPROVAL TPP / IMPLEMENTASI ───────────────────
+// Finding_status sudah embed stage & level — tidak perlu baca APPROVAL_LOG
+// Filter langsung berdasarkan status dan match ke profile user
+
+  var APPROVAL_STATUS_MAP = {
+    'TPP_OR_DEPT_HEAD':   { type: 'APPROVAL_TPP',  label: 'Review TPP',          badge: 'badge-amber',   icon: 'check-circle',  matchFn: function(p, ag) { return !!p.isDeptHead && ag && p.deptHeadAreas && p.deptHeadAreas.indexOf(ag.area_id) !== -1; } },
+    'TPP_OR_AUDITOR':     { type: 'APPROVAL_TPP',  label: 'Review TPP',          badge: 'badge-amber',   icon: 'check-circle',  matchFn: function(p, ag) { return !!p.isAuditor  && ag && _emailInCsv(ag.auditor_emails, p.email); } },
+    'TPP_OR_KOORDINATOR': { type: 'APPROVAL_TPP',  label: 'Approval TPP Final',  badge: 'badge-teal',    icon: 'check-circle',  matchFn: function(p)     { return !!p.isKoordinator; } },
+    'APP_DEPT_HEAD':      { type: 'APPROVAL_IMPL', label: 'Review Implementasi', badge: 'badge-purple',  icon: 'upload-cloud',  matchFn: function(p, ag) { return !!p.isDeptHead && ag && p.deptHeadAreas && p.deptHeadAreas.indexOf(ag.area_id) !== -1; } },
+    'APP_AUDITOR':        { type: 'APPROVAL_IMPL', label: 'Review Implementasi', badge: 'badge-purple',  icon: 'upload-cloud',  matchFn: function(p, ag) { return !!p.isAuditor  && ag && _emailInCsv(ag.auditor_emails, p.email); } },
+    'APP_KOORDINATOR':    { type: 'APPROVAL_IMPL', label: 'Approval Impl Final', badge: 'badge-emerald', icon: 'upload-cloud',  matchFn: function(p)     { return !!p.isKoordinator; } },
+  };
+
+  findings.forEach(function(f) {
+    var meta = APPROVAL_STATUS_MAP[f.finding_status];
+    if (!meta) return;                           // status bukan approval status
+    var ag = f._agenda;
+    if (!meta.matchFn(p, ag)) return;            // user tidak berhak di status ini
+
+    tasks.push({
+      type:      meta.type,
+      badge:     meta.badge,
+      label:     meta.label,
+      agenda:    ag,
+      agenda_id: f.agenda_id,
+      period_id: period.period_id,
+      finding:   f,
+      result_id: f.result_id,
+      icon:      meta.icon,
+      desc:      '#' + f.nomor_persyaratan + '.' + f.check_item_no +
+                 ' · ' + escHtml(ag ? ag.dept : ''),
+    });
+  });
+
+  return tasks;
+}
+
+function _isAuditeeOf(agenda, email) {
+  if (!agenda || !agenda.auditee_emails || !email) return false;
+  var target = String(email).trim().toLowerCase();
+  return String(agenda.auditee_emails).split(',')
+    .map(function(e) { return e.trim().toLowerCase(); })
+    .indexOf(target) !== -1;
+}
+
+function _emailInCsv(csv, email) {
+  if (!csv || !email) return false;
+  var target = String(email).trim().toLowerCase();
+  return String(csv).split(',')
+    .map(function(e) { return e.trim().toLowerCase(); })
+    .indexOf(target) !== -1;
+}
+
+// ── Render My Task ────────────────────────────────────────────
+
+function _renderMyTask(container, tasks, period) {
+  var totalTasks = tasks.length;
+
+  var listHtml = '';
+  if (!tasks.length) {
+    listHtml =
+      '<div class="card"><div class="card-body empty-state" style="padding:60px">' +
+        '<i data-lucide="party-popper" style="width:48px;height:48px;opacity:.2;margin-bottom:16px"></i>' +
+        '<div class="empty-title">Tidak Ada Tugas</div>' +
+        '<div class="empty-desc">Semua sudah beres. Tidak ada yang perlu ditindaklanjuti saat ini.</div>' +
+      '</div></div>';
+  } else {
+    // Group by type
+    var verifikasiTasks  = tasks.filter(function(t) { return t.type === 'VERIFIKASI'; });
+    var isiTppTasks      = tasks.filter(function(t) { return t.type === 'ISI_TPP'; });
+    var uploadImplTasks  = tasks.filter(function(t) { return t.type === 'UPLOAD_IMPL'; });
+    var approvalTppTasks = tasks.filter(function(t) { return t.type === 'APPROVAL_TPP'; });
+    var approvalImplTasks= tasks.filter(function(t) { return t.type === 'APPROVAL_IMPL'; });
+
+    // Helper: render satu section dengan header + table
+    function _taskSection(sectionTitle, sectionIcon, sectionColor, sectionTasks, massApproveBtn) {
+      if (!sectionTasks.length) return '';
+      return '<div class="card mb-16">' +
+        // Section header
+        '<div style="padding:10px 16px;border-bottom:1px solid var(--border);background:var(--bg);' +
+            'display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">' +
+          '<span style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:' + sectionColor + '">' +
+            '<i data-lucide="' + sectionIcon + '" style="width:14px;height:14px"></i>' +
+            sectionTitle +
+            '<span style="font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;' +
+                'background:' + sectionColor + '18;color:' + sectionColor + '">' +
+              sectionTasks.length +
+            '</span>' +
+          '</span>' +
+          (massApproveBtn || '') +
+        '</div>' +
+        // Table
+        '<div class="table-wrap"><table>' +
+          '<thead><tr>' +
+            (sectionTasks[0] && sectionTasks[0].type === 'VERIFIKASI'
+              ? '<th style="width:40px;text-align:center">No</th>' +
+                '<th>Dept / Bagian</th>' +
+                '<th>Auditor</th>' +
+                '<th style="width:110px;text-align:center">Jml Temuan</th>' +
+                '<th style="width:120px">Waktu Selesai</th>' +
+                '<th style="width:48px"></th>'
+              : sectionTasks[0] && sectionTasks[0].type === 'ISI_TPP'
+              ? '<th style="width:40px;text-align:center">No</th>' +
+                '<th style="width:160px">Result ID</th>' +
+                '<th style="width:130px">Dept / Bagian</th>' +
+                '<th>Deskripsi Temuan</th>' +
+                '<th style="width:130px">Lokasi Temuan</th>' +
+                '<th style="width:90px;text-align:center">Bukti</th>' +
+                '<th style="width:48px"></th>'
+              : '<th>Detail</th>' +
+                '<th style="width:150px">Area</th>' +
+                '<th style="width:48px"></th>'
+            ) +
+          '</tr></thead>' +
+          '<tbody>' +
+            sectionTasks.map(function(t) {
+              var globalIdx = tasks.indexOf(t);
+              var areaName  = t.agenda ? escHtml(t.agenda.dept) : '—';
+              var detailHtml = '';
+              if (t.type === 'VERIFIKASI') {
+                // Tabel verifikasi punya kolom sendiri — render sebagai row khusus
+                var ag         = t.agenda || {};
+                var auditorStr = ag.auditor_emails
+                  ? ag.auditor_emails.split(',').map(function(e) {
+                      return '<span style="display:inline-block;padding:1px 7px;border-radius:10px;' +
+                        'background:var(--bg);border:1px solid var(--border);font-size:11px;margin:1px">' +
+                        escHtml(e.trim().split('@')[0]) + '</span>';
+                    }).join('')
+                  : '—';
+                // Waktu selesai = agreement_at (saat auditor submit agreement)
+                var waktuSelesai = '—';
+                if (ag.agreement_at) {
+                  var _agAt    = new Date(ag.agreement_at);
+                  var _now     = new Date();
+                  var _diffMs  = _now - _agAt;
+                  var _diffMin = Math.floor(_diffMs / 60000);
+                  var _diffH   = Math.floor(_diffMs / 3600000);
+                  var _diffD   = Math.floor(_diffMs / 86400000);
+                  if (_diffMin < 1) {
+                    waktuSelesai = 'Baru saja';
+                  } else if (_diffH < 1) {
+                    waktuSelesai = _diffMin + ' menit lalu';
+                  } else if (_diffH < 24) {
+                    waktuSelesai = _diffH + ' jam lalu';
+                  } else if (_diffD === 1) {
+                    waktuSelesai = 'Kemarin';
+                  } else if (_diffD < 7) {
+                    waktuSelesai = _diffD + ' hari lalu';
+                  } else {
+                    waktuSelesai = formatDate(ag.agreement_at);
+                  }
+                }
+                var verifIdx = sectionTasks.indexOf(t);
+                return '<tr style="cursor:pointer" onclick="_openTaskDetail(' + globalIdx + ')" ' +
+                  'onmouseover="this.style.background=\'var(--bg)\'" ' +
+                  'onmouseout="this.style.background=\'\'">' +
+                  '<td style="text-align:center;font-size:12px;color:var(--text-muted);font-weight:600">' + (verifIdx + 1) + '</td>' +
+                  '<td style="font-size:12px;font-weight:600">' + areaName + '</td>' +
+                  '<td>' + auditorStr + '</td>' +
+                  '<td style="text-align:center">' +
+                    '<span style="display:inline-flex;align-items:center;justify-content:center;' +
+                      'width:26px;height:26px;border-radius:50%;background:var(--rose,#f43f5e)18;' +
+                      'color:var(--rose,#f43f5e);font-size:13px;font-weight:700">' +
+                      t.findings.length +
+                    '</span>' +
+                  '</td>' +
+                  '<td style="font-size:12px;color:var(--text-muted)">' + waktuSelesai + '</td>' +
+                  '<td><i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-muted)"></i></td>' +
+                '</tr>';
+              } else if (t.type === 'ISI_TPP') {
+                var tppIdx   = sectionTasks.indexOf(t);
+                var f        = t.finding || {};
+                var fotoUrls = (f.foto_urls || '').split(',').filter(Boolean);
+                var fotoBtnHtml = fotoUrls.length
+                  ? fotoUrls.map(function(url) {
+                      return '<a href="' + escHtml(url) + '" target="_blank" ' +
+                        'onclick="event.stopPropagation()" ' +
+                        'class="btn btn-outline btn-sm" style="font-size:10px;padding:2px 6px">' +
+                        '<i data-lucide="image" style="width:11px;height:11px"></i>' +
+                      '</a>';
+                    }).join('')
+                  : '<span style="font-size:11px;color:var(--text-muted)">—</span>';
+
+                return '<tr style="cursor:pointer" onclick="_openTaskDetail(' + globalIdx + ')" ' +
+                  'onmouseover="this.style.background=\'var(--bg)\'" ' +
+                  'onmouseout="this.style.background=\'\'">' +
+                  '<td style="text-align:center;font-size:12px;color:var(--text-muted);font-weight:600">' + (tppIdx + 1) + '</td>' +
+                  '<td class="td-mono" style="font-size:11px">' + escHtml(t.result_id || '') + '</td>' +
+                  '<td class="text-sm">' + areaName + '</td>' +
+                  '<td style="font-size:12px">' +
+                    '<div style="font-weight:500">' + escHtml(f.deskripsi_temuan || '—') + '</div>' +
+                  '</td>' +
+                  '<td style="font-size:12px;color:var(--text-muted)">' + escHtml(f.lokasi_temuan || '—') + '</td>' +
+                  '<td style="text-align:center" onclick="event.stopPropagation()">' +
+                    '<div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">' + fotoBtnHtml + '</div>' +
+                  '</td>' +
+                  '<td><i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-muted)"></i></td>' +
+                '</tr>';
+              } else {
+                var shortId = t.result_id ? t.result_id.split('_').slice(-2).join('_') : '';
+                detailHtml =
+                  '<span class="td-mono" style="font-size:11px">' + escHtml(shortId) + '</span>' +
+                  (t.finding ? ' · ' + statusBadge(t.finding.status) : '');
+                if (t.finding && t.finding.deskripsi_temuan) {
+                  detailHtml += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;' +
+                    'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px">' +
+                    escHtml(t.finding.deskripsi_temuan) + '</div>';
+                }
+                return '<tr style="cursor:pointer" onclick="_openTaskDetail(' + globalIdx + ')" ' +
+                  'onmouseover="this.style.background=\'var(--bg)\'" ' +
+                  'onmouseout="this.style.background=\'\'">' +
+                  '<td>' + detailHtml + '</td>' +
+                  '<td class="text-sm">' + areaName + '</td>' +
+                  '<td><i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-muted)"></i></td>' +
+                '</tr>';
+              }
+            }).join('') +
+          '</tbody>' +
+        '</table></div>' +
+      '</div>';
+    }
+
+    listHtml =
+      _taskSection('Verifikasi Temuan', 'shield-check', 'var(--amber,#f59e0b)', verifikasiTasks) +
+      _taskSection('Rencana Tindakan Perbaikan dan Pencegahan (TPP)', 'wrench', 'var(--blue,#3b82f6)', isiTppTasks) +
+      _taskSection('Upload Implementasi', 'camera', 'var(--purple,#8b5cf6)', uploadImplTasks) +
+      _taskSection(
+        'Approval TPP', 'check-circle', 'var(--teal,#14b8a6)', approvalTppTasks,
+        (approvalTppTasks.length > 1 && App.profile.isKoordinator
+          ? '<button class="btn btn-outline btn-sm" onclick="_massApproveAll(\'TPP\')">' +
+              '<i data-lucide="check-circle" style="width:13px;height:13px"></i> ' +
+              'Approve Semua (' + approvalTppTasks.length + ')' +
+            '</button>'
+          : '')
+      ) +
+      _taskSection(
+        'Approval Implementasi', 'upload-cloud', 'var(--emerald,#10b981)', approvalImplTasks,
+        (approvalImplTasks.length > 1 && App.profile.isKoordinator
+          ? '<button class="btn btn-outline btn-sm" onclick="_massApproveAll(\'IMPL\')">' +
+              '<i data-lucide="check-circle" style="width:13px;height:13px"></i> ' +
+              'Approve Semua (' + approvalImplTasks.length + ')' +
+            '</button>'
+          : '')
+      );
+  }
+
+  container.innerHTML =
+    '<div class="page-hero mb-24">' +
+      '<h1 style="display:flex;align-items:center;gap:10px">' +
+        '<i data-lucide="list-checks" style="width:24px;height:24px"></i> My Task' +
+      '</h1>' +
+      '<p>Periode: <strong style="color:#fff">' + escHtml(period.nama_periode) + '</strong>' +
+        (totalTasks > 0
+          ? ' · <strong style="color:#fff">' + totalTasks + '</strong> tugas perlu ditindaklanjuti'
+          : ' · Tidak ada tugas') +
+      '</p>' +
+    '</div>' +
+    listHtml;
+
+  // Simpan tasks ke window untuk dipakai saat klik
+  window._myTaskList = tasks;
+  window._myTaskPeriod = period;
+
+  lucide.createIcons();
+}
+
+// ── Task Detail (sub-page) ────────────────────────────────────
+
+function _openTaskDetail(idx) {
+  var task   = window._myTaskList[idx];
+  var period = window._myTaskPeriod;
+  if (!task) return;
+
+  var container = document.getElementById('page-content');
+  window._myTaskReturnIdx = idx;
+
+  switch (task.type) {
+    case 'VERIFIKASI':    _renderVerifikasiPage(container, task, period); break;
+    case 'ISI_TPP':       _renderIsiTppPage(container, task, period);     break;
+    case 'UPLOAD_IMPL':   _renderUploadImplPage(container, task, period); break;
+    case 'APPROVAL_TPP':
+    case 'APPROVAL_IMPL': _renderApprovalPage(container, task, period);   break;
+  }
+}
+
+function _backToMyTask() {
+  navigateTo('mytask');
+}
+
+function _subPageHeader(title, subtitle) {
+  return '<div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">' +
+    '<button class="btn btn-ghost btn-icon" onclick="_backToMyTask()" title="Kembali">' +
+      '<i data-lucide="arrow-left" style="width:16px;height:16px"></i>' +
+    '</button>' +
+    '<div>' +
+      '<div style="font-size:15px;font-weight:700">' + title + '</div>' +
+      '<div style="font-size:12px;color:var(--text-muted)">' + subtitle + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+// ════════════════════════════════════════════════════════════
+//  SUB-PAGE: VERIFIKASI TEMUAN (Koordinator)
+// ════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════
+//  VERIF DRAFT — browser-side draft state untuk verifikasi
+//  Mirip _auditDraft tapi lebih sederhana: no lock, no groupKey
+//  Key: result_id
+//  Value: { result_id, deskripsi_temuan, lokasi_temuan,
+//            foto_urls, status,
+//            _deletedFotoUrls: [], _newFiles: [] }
+// ════════════════════════════════════════════════════════════
+
+function _verifDraftInit() {
+  window._verifDraft = {};          // result_id → draft object
+  window._verifPendingFiles = {};   // result_id → File[]
+}
+
+function _verifDraftSet(resultId, fields) {
+  if (!window._verifDraft) window._verifDraft = {};
+  var merged = Object.assign({}, window._verifDraft[resultId] || {}, fields);
+  // Pastikan _deletedFotoUrls selalu array
+  if (!Array.isArray(merged._deletedFotoUrls)) merged._deletedFotoUrls = [];
+  window._verifDraft[resultId] = merged;
+}
+
+function _verifDraftGet(resultId) {
+  return window._verifDraft && window._verifDraft[resultId] || null;
+}
+
+function _verifDraftClear(resultId) {
+  if (window._verifDraft)      delete window._verifDraft[resultId];
+  if (window._verifPendingFiles) delete window._verifPendingFiles[resultId];
+}
+
+function _verifHasDraft(resultId) {
+  return !!(window._verifDraft && window._verifDraft[resultId]);
+}
+
+// Repaint satu verif-card berdasarkan draft state
+function _verifRepaintCard(cardIdx, resultId) {
+  var card = document.getElementById('verif-card-' + cardIdx);
+  if (!card) return;
+  var draft = _verifDraftGet(resultId);
+
+  // Ambil nilai yang akan ditampilkan (draft > original dari data-* attr)
+  var desc    = draft ? draft.deskripsi_temuan : (card.dataset.origDesc   || '');
+  var lokasi  = draft ? draft.lokasi_temuan    : (card.dataset.origLokasi || '');
+  var status  = draft ? draft.status           : (card.dataset.origStatus || 'Non Comply');
+  var isDraft = !!draft;
+  var isComply = status === 'Comply';
+
+  // Warna background card
+  card.style.background    = isDraft ? 'rgba(245,158,11,.08)' : '';
+  card.style.borderColor   = isDraft ? 'var(--amber,#f59e0b)' : '';
+  card.style.borderWidth   = isDraft ? '1.5px' : '';
+
+  // Update badge status di header
+  var badgeEl = card.querySelector('.verif-status-badge');
+  if (badgeEl) {
+    badgeEl.className   = 'badge verif-status-badge ' + (isComply ? 'badge-emerald' : 'badge-rose');
+    badgeEl.innerHTML   = (isComply
+      ? '<i data-lucide="check" style="width:11px;height:11px"></i> Comply'
+      : '<i data-lucide="x" style="width:11px;height:11px"></i> Non Comply');
+    lucide.createIcons(badgeEl);
+  }
+
+  // Draft dot
+  var draftDot = card.querySelector('.verif-draft-dot');
+  if (draftDot) draftDot.style.display = isDraft ? 'inline-block' : 'none';
+
+  // Deskripsi display
+  var descEl = card.querySelector('.verif-desc-display');
+  if (descEl) descEl.textContent = isComply ? '(Akan diubah ke Comply — temuan ditutup)' : (desc || '—');
+  if (descEl) descEl.style.color = isComply ? 'var(--emerald,#10b981)' : isDraft ? 'var(--amber,#f59e0b)' : '';
+  if (descEl) descEl.style.fontStyle = isComply ? 'italic' : '';
+
+  // Lokasi display
+  var lokasiEl = card.querySelector('.verif-lokasi-display');
+  if (lokasiEl) {
+    lokasiEl.textContent = lokasi || '—';
+    lokasiEl.style.color = isDraft ? 'var(--amber,#f59e0b)' : '';
+  }
+
+  // Foto display — rebuild
+  var fotoEl = card.querySelector('.verif-foto-display');
+  if (fotoEl) {
+    var fotoUrls    = draft ? (typeof draft.foto_urls === 'string' ? draft.foto_urls : '') : (card.dataset.origFotoUrls || '');
+    var deletedUrls = draft ? (Array.isArray(draft._deletedFotoUrls) ? draft._deletedFotoUrls : []) : [];
+    var activeUrls  = fotoUrls.split(',').filter(function(u) {
+      return u && deletedUrls.indexOf(u) === -1;
+    });
+    var pendingCount = (window._verifPendingFiles && window._verifPendingFiles[resultId])
+      ? window._verifPendingFiles[resultId].length : 0;
+
+    fotoEl.innerHTML = activeUrls.map(function(url) {
+      return '<a href="' + escHtml(url) + '" target="_blank" class="btn btn-outline btn-sm">' +
+        '<i data-lucide="image" style="width:12px;height:12px"></i> Lihat Foto' +
+      '</a>';
+    }).join('') +
+    (pendingCount > 0
+      ? '<span style="font-size:11px;color:var(--amber,#f59e0b);font-weight:600;margin-left:4px">' +
+          '<i data-lucide="clock" style="width:11px;height:11px;vertical-align:middle"></i> ' +
+          pendingCount + ' foto baru (belum disimpan)' +
+        '</span>'
+      : '');
+    lucide.createIcons(fotoEl);
+  }
+}
+
+async function _renderVerifikasiPage(container, task, period) {
+  container.innerHTML =
+    '<div class="page-loader"><div class="spinner dark"></div><span>Memuat temuan...</span></div>';
+
+  // Init draft state baru setiap kali halaman di-render
+  _verifDraftInit();
+  // Simpan context untuk dipakai modal
+  window._verifCtx = { task: task, period: period };
+
+  try {
+    var findings = await api('GET_FINDINGS_BY_AGENDA', {
+      period_id: period.period_id,
+      agenda_id: task.agenda_id,
+    });
+    // Simpan findings ke window untuk repaint
+    window._verifFindings = findings.filter(function(f) {
+      return f.finding_status === 'PENDING_VERIFICATION';
+    });
+    var pendingFindings = window._verifFindings;
+
+    var cardsHtml = pendingFindings.map(function(f, i) {
+      return _verifRenderCard(f, i);
+    }).join('');
+
+    container.innerHTML =
+      _subPageHeader(
+        'Verifikasi Temuan — ' + escHtml(task.agenda ? task.agenda.dept : ''),
+        pendingFindings.length + ' temuan menunggu verifikasi'
+      ) +
+      (pendingFindings.length === 0
+        ? '<div class="card"><div class="card-body empty-state"><div class="empty-desc">Tidak ada temuan yang perlu diverifikasi.</div></div></div>'
+        : cardsHtml +
+          '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
+            '<button class="btn btn-outline" onclick="_backToMyTask()">Batal</button>' +
+            '<button class="btn btn-primary" id="verif-submit-btn" ' +
+              'onclick="singleClick(this,function(){ _verifClickVerifikasi() })">' +
+              '<i data-lucide="shield-check" style="width:14px;height:14px"></i> Verifikasi Semua' +
+            '</button>' +
+          '</div>'
+      );
+    lucide.createIcons();
+    setTimeout(function() { _loadAllDriveImgs(container); }, 200);
+  } catch(err) {
+    container.innerHTML = _subPageHeader('Verifikasi Temuan', '') +
+      '<div class="empty-state"><div class="empty-desc">' + escHtml(err.message) + '</div></div>';
+    lucide.createIcons();
+  }
+}
+
+// ── Render satu card temuan (dipanggil saat init + setelah edit) ──────────────
+function _verifRenderCard(f, i) {
+  var draft   = _verifDraftGet(f.result_id);
+  var isDraft = !!draft;
+  var isComply = isDraft ? draft.status === 'Comply' : false;
+
+  var dispDesc   = isDraft ? (draft.deskripsi_temuan || '') : (f.deskripsi_temuan || '—');
+  var dispLokasi = isDraft ? (draft.lokasi_temuan    || '') : (f.lokasi_temuan    || '');
+
+  var deletedUrls  = isDraft ? (Array.isArray(draft._deletedFotoUrls) ? draft._deletedFotoUrls : []) : [];
+  var baseFotoUrls = isDraft ? (typeof draft.foto_urls === 'string' ? draft.foto_urls : (f.foto_urls || '')) : (f.foto_urls || '');
+  var activeFotoUrls = baseFotoUrls.split(',').filter(function(u) {
+    return u && deletedUrls.indexOf(u) === -1;
+  });
+  var pendingCount = (window._verifPendingFiles && window._verifPendingFiles[f.result_id])
+    ? window._verifPendingFiles[f.result_id].length : 0;
+
+  var cardBg    = isDraft ? 'rgba(245,158,11,.08)' : '';
+  var cardBorder= isDraft ? '1.5px solid var(--amber,#f59e0b)' : '1px solid var(--border)';
+
+  return '<div class="card mb-12" id="verif-card-' + i + '" ' +
+    'data-result-id="' + escAttr(f.result_id) + '" ' +
+    'data-orig-desc="' + escAttr(f.deskripsi_temuan || '') + '" ' +
+    'data-orig-lokasi="' + escAttr(f.lokasi_temuan || '') + '" ' +
+    'data-orig-status="' + escAttr(f.status || 'Non Comply') + '" ' +
+    'data-orig-foto-urls="' + escAttr(f.foto_urls || '') + '" ' +
+    'style="background:' + cardBg + ';border:' + cardBorder + ';border-radius:10px;overflow:hidden;margin-bottom:12px">' +
+    '<div class="card-body">' +
+
+      // ── Header ─────────────────────────────────────────────
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">' +
+        '<span style="display:inline-flex;align-items:center;justify-content:center;' +
+          'width:26px;height:26px;border-radius:50%;background:var(--rose,#f43f5e)18;' +
+          'color:var(--rose,#f43f5e);font-size:12px;font-weight:700;flex-shrink:0">' + (i + 1) + '</span>' +
+        '<span class="badge verif-status-badge ' + (isComply ? 'badge-emerald' : 'badge-rose') + '" ' +
+          'style="display:inline-flex;align-items:center;gap:4px">' +
+          (isComply
+            ? '<i data-lucide="check" style="width:11px;height:11px"></i> Comply'
+            : '<i data-lucide="x" style="width:11px;height:11px"></i> Non Comply') +
+        '</span>' +
+        '<span class="td-mono" style="font-size:11px;color:var(--text-muted)">' +
+          escHtml(f.result_id) +
+        '</span>' +
+        // Draft dot
+        '<span class="verif-draft-dot" style="display:' + (isDraft ? 'inline-block' : 'none') + ';' +
+          'width:7px;height:7px;border-radius:50%;background:var(--amber,#f59e0b);flex-shrink:0"></span>' +
+        '<span style="flex:1"></span>' +
+        // Tombol pensil
+        '<button title="Edit temuan" ' +
+          'onclick="_verifOpenEditModal(\'' + escAttr(f.result_id) + '\',' + i + ')" ' +
+          'style="display:inline-flex;align-items:center;padding:4px 8px;border-radius:6px;' +
+            'border:1px solid var(--border);background:transparent;color:var(--text-muted);' +
+            'cursor:pointer;font-size:12px;gap:5px;line-height:1">' +
+          '<i data-lucide="pencil" style="width:12px;height:12px"></i> Edit' +
+        '</button>' +
+      '</div>' +
+
+      // ── Konteks checklist ──────────────────────────────────
+      '<details style="margin-bottom:14px;border:1px solid var(--border);border-radius:8px;overflow:hidden">' +
+        '<summary style="padding:9px 14px;font-size:12px;font-weight:600;cursor:pointer;' +
+          'background:var(--bg);list-style:none;display:flex;align-items:center;gap:6px;color:var(--text-muted)">' +
+          '<i data-lucide="book-open" style="width:13px;height:13px"></i>Persyaratan & Check Item' +
+        '</summary>' +
+        '<div style="padding:12px 14px;display:grid;gap:10px">' +
+          (f.persyaratan
+            ? '<div><div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px">PERSYARATAN</div>' +
+              '<div style="font-size:13px;line-height:1.5">' + escHtml(f.persyaratan) + '</div></div>' : '') +
+          (f.check_item
+            ? '<div style="padding-top:8px;border-top:1px solid var(--border)">' +
+              '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px">CHECK ITEM</div>' +
+              '<div style="font-size:13px;line-height:1.5">' + escHtml(f.check_item) + '</div></div>' : '') +
+          (f.standar_check_item
+            ? '<div style="padding-top:8px;border-top:1px solid var(--border)">' +
+              '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px">STANDAR</div>' +
+              '<div style="font-size:12px;line-height:1.5;color:var(--text-muted)">' + escHtml(f.standar_check_item) + '</div></div>' : '') +
+        '</div>' +
+      '</details>' +
+
+      // ── Deskripsi ──────────────────────────────────────────
+      '<div style="margin-bottom:10px">' +
+        '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px">DESKRIPSI TEMUAN</div>' +
+        '<div class="verif-desc-display" style="font-size:13px;line-height:1.6;padding:9px 12px;' +
+          'background:var(--bg);border:1px solid var(--border);border-radius:6px;' +
+          (isDraft && !isComply ? 'color:var(--amber,#f59e0b);' : '') +
+          (isComply ? 'color:var(--emerald,#10b981);font-style:italic;' : '') + '">' +
+          (isComply ? '(Akan diubah ke Comply — temuan ditutup)' : escHtml(dispDesc)) +
+        '</div>' +
+      '</div>' +
+
+      // ── Lokasi ─────────────────────────────────────────────
+      '<div style="margin-bottom:10px">' +
+        '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px">LOKASI TEMUAN</div>' +
+        '<div class="verif-lokasi-display" style="font-size:13px;padding:7px 12px;' +
+          'background:var(--bg);border:1px solid var(--border);border-radius:6px;' +
+          (isDraft && !isComply ? 'color:var(--amber,#f59e0b);' : '') + '">' +
+          escHtml(isComply ? '—' : (dispLokasi || '—')) +
+        '</div>' +
+      '</div>' +
+
+      // ── Foto Bukti ─────────────────────────────────────────
+      '<div>' +
+        '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px">FOTO BUKTI</div>' +
+        '<div class="verif-foto-display" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
+          activeFotoUrls.map(function(url) {
+            return '<a href="' + escHtml(url) + '" target="_blank" class="btn btn-outline btn-sm" data-drive-url="' + escAttr(url) + '">' +
+              '<i data-lucide="image" style="width:12px;height:12px"></i> Lihat Foto</a>';
+          }).join('') +
+          (pendingCount > 0
+            ? '<span style="font-size:11px;color:var(--amber,#f59e0b);font-weight:600">' +
+                '<i data-lucide="clock" style="width:11px;height:11px;vertical-align:middle"></i> ' +
+                pendingCount + ' foto baru' +
+              '</span>'
+            : '') +
+          (activeFotoUrls.length === 0 && pendingCount === 0 ? '<span style="font-size:12px;color:var(--text-muted)">—</span>' : '') +
+        '</div>' +
+      '</div>' +
+
+    '</div>' +
+  '</div>';
+}
+
+function _buildStatusOptions(current) {
+  var options = ['Non Comply', 'Comply'];
+  return options.map(function(s) {
+    return '<option value="' + s + '" ' + (s === current ? 'selected' : '') + '>' + s + '</option>';
+  }).join('');
+}
+
+function _verifDetectChange(idx) {
+  var descEl        = document.getElementById('verif-desc-'          + idx);
+  var statusEl      = document.getElementById('verif-status-'        + idx);
+  var descBadgeEl   = document.getElementById('verif-desc-badge-'    + idx);
+  var statusBadgeEl = document.getElementById('verif-status-badge-'  + idx);
+  if (descEl   && descBadgeEl)   descBadgeEl.style.display   = (descEl.value.trim()   !== (descEl.dataset.orig   || '')) ? 'inline-flex' : 'none';
+  if (statusEl && statusBadgeEl) statusBadgeEl.style.display = (statusEl.value !== (statusEl.dataset.orig || '')) ? 'inline-flex' : 'none';
+}
+
+async function _verifOpenEditModal(resultId, cardIdx) {
+  var ctx   = window._verifCtx;
+  var f     = window._verifFindings && window._verifFindings[cardIdx];
+  if (!f || !ctx) return;
+
+  // Ambil nilai saat ini: draft lebih prioritas dari server
+  var draft = _verifDraftGet(resultId);
+  var initDesc   = draft ? (draft.deskripsi_temuan || '') : (f.deskripsi_temuan || '');
+  var initLokasi = draft ? (draft.lokasi_temuan    || '') : (f.lokasi_temuan    || '');
+  var initStatus = draft ? draft.status : (f.status || 'Non Comply');
+  var initFotoUrls = draft ? (draft.foto_urls || f.foto_urls || '') : (f.foto_urls || '');
+  var initDeleted  = draft ? (Array.isArray(draft._deletedFotoUrls) ? draft._deletedFotoUrls : []) : [];
+  var pendingFiles = (window._verifPendingFiles && window._verifPendingFiles[resultId]) || [];
+
+  // Build foto saved html — reuse _buildSavedFotosHtml dengan prefix 'vf'
+  // tapi tanpa delete ke server, hanya mark deleted
+  var activeFotoUrls = initFotoUrls.split(',').filter(function(u) {
+    return u && initDeleted.indexOf(u) === -1;
+  });
+  window._vfExistingUrls = activeFotoUrls.slice();
+  window._vfDeletedUrls  = initDeleted.slice();
+
+  var savedFotoHtml = activeFotoUrls.length
+    ? '<div style="margin-bottom:8px">' +
+        '<div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px">Foto tersimpan:</div>' +
+        '<div id="vf-saved-files" style="display:flex;flex-wrap:wrap;gap:8px">' +
+          activeFotoUrls.map(function(url, idx) {
+            return '<div style="position:relative;width:72px;height:72px;border-radius:6px;' +
+              'overflow:hidden;border:1px solid var(--border);cursor:zoom-in" ' +
+              'onclick="_openFotoLightbox(\'' + escAttr(url) + '\')">' +
+              _renderDriveImg(url) +
+              '<button title="Hapus foto" ' +
+                'onclick="event.stopPropagation();singleClick(this,function(){ _verifMarkDeleteFoto(\'' + escAttr(url) + '\',' + idx + ') })" ' +
+                'style="position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;' +
+                  'background:rgba(0,0,0,.55);border:none;color:#fff;cursor:pointer;' +
+                  'display:flex;align-items:center;justify-content:center;font-size:10px;padding:0">✕</button>' +
+            '</div>';
+          }).join('') +
+        '</div>' +
+      '</div>'
+    : '';
+
+  createModal({
+    id:    'verif-edit-modal',
+    title: 'Edit Temuan — ' + escHtml(f.result_id),
+    size:  'modal-lg',
+    body:
+      // Konten temuan
+      '<div id="vem-noncomplysection">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Deskripsi Temuan <span class="required">*</span></label>' +
+          '<textarea class="form-control" id="vem-deskripsi" rows="4" ' +
+            'placeholder="Jelaskan kondisi yang ditemukan...">' +
+            escHtml(initDesc) +
+          '</textarea>' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label class="form-label">Lokasi Temuan <span class="required">*</span></label>' +
+          '<input type="text" class="form-control" id="vem-lokasi" ' +
+            'placeholder="e.g. Gudang B, Lantai 2, Area penyimpanan kimia" ' +
+            'value="' + escHtml(initLokasi) + '">' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label class="form-label">Foto Bukti <span class="required">*</span>' +
+            '<span id="vem-foto-hint" style="font-size:11px;color:var(--rose,#f43f5e);font-weight:400;margin-left:6px">' +
+              (activeFotoUrls.length + pendingFiles.length > 0 ? '' : '(wajib minimal 1 foto)') +
+            '</span>' +
+          '</label>' +
+          savedFotoHtml +
+          (pendingFiles.length > 0
+            ? '<div style="font-size:11px;color:var(--amber,#f59e0b);font-weight:600;margin-bottom:6px">' +
+                '<i data-lucide="clock" style="width:11px;height:11px;vertical-align:middle"></i> ' +
+                pendingFiles.length + ' foto baru (belum disimpan)' +
+              '</div>'
+            : '') +
+          '<div class="upload-zone" id="vem-upload-zone" style="min-height:72px">' +
+            '<i data-lucide="camera" style="width:22px;height:22px;opacity:.3;margin-bottom:4px"></i>' +
+            '<div class="upload-text" style="font-size:12px">Klik atau drag foto bukti baru</div>' +
+          '</div>' +
+          '<div class="upload-previews" id="vem-upload-preview"></div>' +
+        '</div>' +
+      '</div>',
+
+    footer:
+      '<button class="btn btn-outline" style="margin-right:auto" ' +
+        'onclick="singleClick(this,function(){ _verifSwitchToComply(' + cardIdx + ') })">' +
+        '<i data-lucide="check" style="width:13px;height:13px"></i> Ubah ke Comply' +
+      '</button>' +
+      '<button class="btn btn-outline" onclick="closeModal(\'verif-edit-modal\')">Batal</button>' +
+      '<button class="btn btn-danger" onclick="singleClick(this,function(){ _verifSaveEditModal(' + cardIdx + ') })">' +
+        '<i data-lucide="save" style="width:13px;height:13px"></i> Simpan Temuan' +
+      '</button>',
+  });
+
+  setTimeout(function() { _loadAllDriveImgs(document.getElementById('verif-edit-modal') || document); }, 300);
+  lucide.createIcons();
+
+  // Setup upload zone — reuse setupUploadZone dari form audit
+  setupUploadZone('vem-upload-zone', 'vem-upload-preview', function(files) {
+    var hint = document.getElementById('vem-foto-hint');
+    if (!hint) return;
+    var savedCount = (window._vfExistingUrls || []).length - (window._vfDeletedUrls || []).length;
+    hint.textContent = (files.length + savedCount) > 0 ? '' : '(wajib minimal 1 foto)';
+  });
+
+  // Restore pending files ke zone agar bisa dilihat preview dan dihapus/diganti
+  // Simpan jumlah existing pending ke zone sebagai marker untuk deduplikasi
+  setTimeout(function() {
+    var zoneEl = document.getElementById('vem-upload-zone');
+    if (zoneEl && zoneEl._setFiles) {
+      zoneEl._setFiles(pendingFiles);
+      zoneEl._existingPendingCount = pendingFiles.length; // marker
+    } else if (zoneEl) {
+      zoneEl._existingPendingCount = pendingFiles.length;
+    }
+  }, 50);
+
+}
+
+function _verifEditStatusChange() {} // dropdown dihapus — no-op
+
+function _verifMarkDeleteFoto(url, idx) {
+  if (!window._vfDeletedUrls) window._vfDeletedUrls = [];
+  if (window._vfDeletedUrls.indexOf(url) === -1) window._vfDeletedUrls.push(url);
+
+  // Hapus dari DOM
+  var savedContainer = document.getElementById('vf-saved-files');
+  if (savedContainer) {
+    var items = Array.from(savedContainer.querySelectorAll(':scope > div'));
+    if (items[idx]) items[idx].remove();
+  }
+
+  // Update hint
+  var zone = document.getElementById('vem-upload-zone');
+  var hint = document.getElementById('vem-foto-hint');
+  if (hint && zone) {
+    var pending  = zone._getFiles ? zone._getFiles().length : 0;
+    var remaining = (window._vfExistingUrls || []).length - (window._vfDeletedUrls || []).length;
+    hint.textContent = (pending + remaining) > 0 ? '' : '(wajib minimal 1 foto)';
+  }
+}
+
+function _verifSwitchToComply(cardIdx) {
+  _verifSaveEditModal(cardIdx, true); // true = force Comply
+}
+
+function _verifSaveEditModal(cardIdx, forceComply) {
+  var f = window._verifFindings && window._verifFindings[cardIdx];
+  if (!f) return;
+
+  var descEl   = document.getElementById('vem-deskripsi');
+  var lokasiEl = document.getElementById('vem-lokasi');
+  var zone     = document.getElementById('vem-upload-zone');
+  var newStatus = forceComply ? 'Comply' : 'Non Comply';
+
+  if (newStatus === 'Non Comply') {
+    var desc   = descEl   ? descEl.value.trim()   : '';
+    var lokasi = lokasiEl ? lokasiEl.value.trim()  : '';
+    if (!desc)   return toast('Deskripsi temuan wajib diisi.', 'error');
+    if (!lokasi) return toast('Lokasi temuan wajib diisi.', 'error');
+
+    var allZoneFiles = zone && zone._getFiles ? zone._getFiles() : [];
+    var savedCount   = (window._vfExistingUrls || []).length - (window._vfDeletedUrls || []).length;
+    var existPending = (window._verifPendingFiles && window._verifPendingFiles[f.result_id]) || [];
+
+    // Ambil hanya file BARU: zone berisi [existingPending... + newFiles...]
+    // _existingPendingCount adalah marker jumlah file lama yang di-restore saat modal dibuka
+    var existingCount = (zone && zone._existingPendingCount != null)
+      ? zone._existingPendingCount
+      : existPending.length;
+    var trulyNewFiles = allZoneFiles.slice(existingCount);
+
+    if (trulyNewFiles.length + savedCount + existPending.length < 1) {
+      return toast('Upload minimal 1 foto bukti temuan.', 'error');
+    }
+
+    // Gabungkan: existing pending + file benar-benar baru
+    var allPending = existPending.concat(trulyNewFiles);
+    if (!window._verifPendingFiles) window._verifPendingFiles = {};
+    window._verifPendingFiles[f.result_id] = allPending;
+
+    // Hitung foto_urls yang masih aktif (existing minus deleted)
+    var baseUrls    = (f.foto_urls || '').split(',').filter(Boolean);
+    var deleted     = window._vfDeletedUrls || [];
+    var activeUrls  = baseUrls.filter(function(u) { return deleted.indexOf(u) === -1; });
+
+    _verifDraftSet(f.result_id, {
+      status:            'Non Comply',
+      deskripsi_temuan:  desc,
+      lokasi_temuan:     lokasi,
+      foto_urls:         activeUrls.join(','),
+      _deletedFotoUrls:  deleted.slice(),
+    });
+  } else {
+    // Comply — clear semua finding data di draft
+    _verifDraftSet(f.result_id, {
+      status:           'Comply',
+      deskripsi_temuan: '',
+      lokasi_temuan:    '',
+      foto_urls:        '',
+      _deletedFotoUrls: [],
+    });
+    if (window._verifPendingFiles) delete window._verifPendingFiles[f.result_id];
+  }
+
+  closeModal('verif-edit-modal');
+
+  // Repaint card dengan data draft baru
+  var card = document.getElementById('verif-card-' + cardIdx);
+  if (card) {
+    card.outerHTML = _verifRenderCard(f, cardIdx);
+    lucide.createIcons(document.getElementById('verif-card-' + cardIdx));
+    setTimeout(function() {
+      _loadAllDriveImgs(document.getElementById('verif-card-' + cardIdx));
+    }, 100);
+  }
+}
+
+function _verifEditStatusChange() {} // dropdown dihapus — no-op
+
+async function _verifSaveEdit(resultId, agendaId, periodId, cardIdx) {
+  var statusEl  = document.getElementById('vem-status');
+  var descEl    = document.getElementById('vem-deskripsi');
+  var newStatus = statusEl ? statusEl.value : 'Non Comply';
+  var newDesc   = descEl   ? descEl.value.trim() : '';
+
+  if (newStatus === 'Non Comply' && !newDesc) {
+    return toast('Deskripsi temuan wajib diisi.', 'error');
+  }
+
+  // Update hidden fields di card agar _submitVerifikasi pakai nilai baru
+  var descHidden   = document.getElementById('verif-desc-'         + cardIdx);
+  var statusHidden = document.getElementById('verif-status-'       + cardIdx);
+  var displayEl    = document.getElementById('verif-desc-display-' + cardIdx);
+  if (descHidden)   descHidden.value   = newDesc;
+  if (statusHidden) statusHidden.value = newStatus;
+
+  // Update tampilan display di card
+  if (displayEl) displayEl.textContent = newDesc || '—';
+
+  // Update badge status di header card
+  var card = document.getElementById('verif-card-' + cardIdx);
+  if (card) {
+    var badgeEl = card.querySelector('.badge');
+    if (badgeEl) {
+      badgeEl.className = 'badge ' + (newStatus === 'Comply' ? 'badge-emerald' : 'badge-rose');
+      badgeEl.textContent = newStatus;
+    }
+  }
+
+  closeModal('verif-edit-modal');
+  toast('Perubahan akan disimpan saat klik "Verifikasi Semua".', 'info');
+}
+
+// _confirmDeleteFinding dihapus — koordinator cukup ubah Jenis Temuan ke Comply saat verifikasi
+
+function _verifClickVerifikasi() {
+  var ctx = window._verifCtx;
+  if (!ctx) return;
+  var findings = window._verifFindings || [];
+
+  // Pisahkan: yang diubah (ada draft) vs tidak diubah
+  var changedFindings = findings.filter(function(f) { return _verifHasDraft(f.result_id); });
+  var unchangedCount  = findings.length - changedFindings.length;
+
+  // Bangun preview HTML hanya untuk yang berubah
+  var previewHtml = '';
+  if (changedFindings.length === 0) {
+    previewHtml = '<p style="font-size:13px;color:var(--text-muted)">Tidak ada temuan yang diubah. Semua temuan akan diverifikasi dengan data asli dari auditor.</p>';
+  } else {
+    previewHtml = changedFindings.map(function(f) {
+      var draft    = _verifDraftGet(f.result_id);
+      var isComply = draft.status === 'Comply';
+
+      // Foto preview — active urls + pending files
+      var deletedUrls  = Array.isArray(draft._deletedFotoUrls) ? draft._deletedFotoUrls : [];
+      var baseFoto     = typeof draft.foto_urls === 'string' ? draft.foto_urls : (f.foto_urls || '');
+      var activeFotoUrls = baseFoto.split(',').filter(function(u) {
+        return u && deletedUrls.indexOf(u) === -1;
+      });
+      var pendingFiles = (window._verifPendingFiles && window._verifPendingFiles[f.result_id]) || [];
+      var pendingPreviews = pendingFiles.map(function(file) {
+        try { return URL.createObjectURL(file); } catch(e) { return ''; }
+      }).filter(Boolean);
+
+      var allFotoHtml = '';
+      if (!isComply) {
+        var allFotoLinks = activeFotoUrls.map(function(url) {
+          return '<a href="' + escHtml(url) + '" target="_blank" ' +
+            'style="display:inline-flex;align-items:center;justify-content:center;' +
+              'width:56px;height:56px;border-radius:6px;overflow:hidden;' +
+              'border:1px solid var(--border);background:var(--bg);flex-shrink:0" ' +
+            'onclick="event.stopPropagation()">' +
+            '<img data-drive-url="' + escAttr(url) + '" src="" ' +
+              'style="width:100%;height:100%;object-fit:cover" ' +
+              'onerror="this.style.display=\'none\'">' +
+          '</a>';
+        }).join('');
+        var pendingLinks = pendingPreviews.map(function(src) {
+          return '<div style="display:inline-flex;align-items:center;justify-content:center;' +
+            'width:56px;height:56px;border-radius:6px;overflow:hidden;' +
+            'border:1.5px dashed var(--amber,#f59e0b);background:var(--bg);flex-shrink:0">' +
+            '<img src="' + src + '" style="width:100%;height:100%;object-fit:cover">' +
+          '</div>';
+        }).join('');
+        if (allFotoLinks || pendingLinks) {
+          allFotoHtml = '<div style="margin-top:8px">' +
+            '<div style="font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--text-muted);margin-bottom:5px">FOTO BUKTI</div>' +
+            '<div style="display:flex;flex-wrap:wrap;gap:6px">' + allFotoLinks + pendingLinks + '</div>' +
+            (deletedUrls.length
+              ? '<div style="font-size:11px;color:var(--rose,#f43f5e);margin-top:4px">' +
+                  '<i data-lucide="trash-2" style="width:11px;height:11px;vertical-align:middle"></i> ' +
+                  deletedUrls.length + ' foto dihapus' +
+                '</div>'
+              : '') +
+          '</div>';
+        }
+      }
+
+      return '<div style="padding:12px 14px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px">' +
+
+        // ── Header: badge + result ID ──
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
+          '<span class="badge ' + (isComply ? 'badge-emerald' : 'badge-amber') + '" ' +
+            'style="display:inline-flex;align-items:center;gap:4px;font-size:11px;flex-shrink:0">' +
+            (isComply ? '✓ Comply' : '✎ Diubah') +
+          '</span>' +
+          '<span class="td-mono" style="font-size:11px;color:var(--text-muted)">' + escHtml(f.result_id) + '</span>' +
+        '</div>' +
+
+        // ── Konteks checklist (ringkas, satu baris per field) ──
+        '<div style="padding:8px 10px;background:var(--bg);border-radius:6px;margin-bottom:10px;' +
+          'display:grid;gap:4px;font-size:11px;color:var(--text-muted)">' +
+          (f.persyaratan
+            ? '<div><span style="font-weight:700">Persyaratan: </span>' + escHtml(f.persyaratan.length > 80 ? f.persyaratan.substring(0, 80) + '…' : f.persyaratan) + '</div>'
+            : '') +
+          (f.check_item
+            ? '<div><span style="font-weight:700">Check Item: </span>' + escHtml(f.check_item.length > 80 ? f.check_item.substring(0, 80) + '…' : f.check_item) + '</div>'
+            : '') +
+          (f.standar_check_item
+            ? '<div><span style="font-weight:700">Standar: </span>' + escHtml(f.standar_check_item.length > 80 ? f.standar_check_item.substring(0, 80) + '…' : f.standar_check_item) + '</div>'
+            : '') +
+        '</div>' +
+
+        // ── Isi: comply atau perubahan ──
+        (isComply
+          ? '<div style="font-size:12px;color:var(--emerald,#10b981);font-style:italic">' +
+              'Temuan akan ditutup (diubah ke Comply)' +
+            '</div>'
+          : '<div style="display:grid;gap:6px;font-size:12px">' +
+              '<div>' +
+                '<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--text-muted)">DESKRIPSI</span>' +
+                '<div style="margin-top:2px;' + (draft.deskripsi_temuan !== f.deskripsi_temuan ? 'color:var(--amber,#f59e0b);' : '') + '">' +
+                  escHtml(draft.deskripsi_temuan || '—') +
+                '</div>' +
+              '</div>' +
+              '<div>' +
+                '<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--text-muted)">LOKASI</span>' +
+                '<div style="margin-top:2px;' + (draft.lokasi_temuan !== f.lokasi_temuan ? 'color:var(--amber,#f59e0b);' : '') + '">' +
+                  escHtml(draft.lokasi_temuan || '—') +
+                '</div>' +
+              '</div>' +
+              allFotoHtml +
+            '</div>') +
+
+      '</div>';
+    }).join('');
+  }
+
+  if (unchangedCount > 0) {
+    previewHtml += '<div style="font-size:12px;color:var(--text-muted);margin-top:8px;padding:8px 12px;' +
+      'background:var(--bg);border-radius:6px">' +
+      unchangedCount + ' temuan lainnya diverifikasi tanpa perubahan.' +
+    '</div>';
+  }
+
+  createModal({
+    id:    'verif-preview-modal',
+    title: 'Konfirmasi Verifikasi',
+    size:  'modal-lg',
+    body:
+      '<p style="font-size:13px;margin-bottom:16px">Periksa ringkasan perubahan sebelum menyimpan ke sistem:</p>' +
+      previewHtml,
+    footer:
+      '<button class="btn btn-outline" onclick="closeModal(\'verif-preview-modal\')">Kembali</button>' +
+      '<button class="btn btn-primary" id="verif-confirm-btn" ' +
+        'onclick="singleClick(this,function(){ _verifConfirmSubmit() })">' +
+        '<i data-lucide="shield-check" style="width:13px;height:13px"></i> Konfirmasi & Simpan' +
+      '</button>',
+  });
+  lucide.createIcons();
+  setTimeout(function() {
+    _loadAllDriveImgs(document.getElementById('verif-preview-modal') || document);
+  }, 200);
+}
+
+async function _verifConfirmSubmit() {
+  var ctx      = window._verifCtx;
+  var findings = window._verifFindings || [];
+  var agendaId = ctx.task.agenda_id;
+  var periodId = ctx.period.period_id;
+
+  // DEBUG — dump semua draft state
+  console.log('[VERIF_CONFIRM] findings count:', findings.length);
+  findings.forEach(function(f) {
+    var d = _verifDraftGet(f.result_id);
+    console.log('[DRAFT]', f.result_id, {
+      hasDraft:         !!d,
+      status:           d && d.status,
+      foto_urls:        d && d.foto_urls,
+      foto_urls_type:   d && typeof d.foto_urls,
+      _deletedFotoUrls: d && d._deletedFotoUrls,
+      _deleted_type:    d && typeof d._deletedFotoUrls,
+      _deleted_isArray: d && Array.isArray(d._deletedFotoUrls),
+    });
+  });
+
+  var btn = document.getElementById('verif-confirm-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner" style="width:13px;height:13px;border-width:2px"></div> Menyimpan...'; }
+
+  try {
+    // Bangun updates — semua findings (draft + non-draft)
+    var updates = await Promise.all(findings.map(async function(f) {
+      var draft = _verifDraftGet(f.result_id);
+      if (!draft) {
+        // Tidak diubah — kirim data asli
+        return {
+          result_id:    f.result_id,
+          final_status: f.status || 'Non Comply',
+        };
+      }
+      if (draft.status === 'Comply') {
+        // Hapus foto yang di-mark deleted dari Drive (non-fatal)
+        if (draft._deletedFotoUrls && draft._deletedFotoUrls.length) {
+          for (var _di = 0; _di < draft._deletedFotoUrls.length; _di++) {
+            try { await api('DELETE_DRIVE_FILE', { file_url: draft._deletedFotoUrls[_di] }); } catch(e) {}
+          }
+        }
+        return {
+          result_id:    f.result_id,
+          final_status: 'Comply',
+        };
+      }
+      // Non Comply dengan perubahan — encode foto baru
+      var newFiles = (window._verifPendingFiles && window._verifPendingFiles[f.result_id]) || [];
+      console.log('[ENCODE] result_id:', f.result_id, 'newFiles type:', typeof newFiles, 'isArray:', Array.isArray(newFiles), 'length:', newFiles && newFiles.length);
+      console.log('[ENCODE] newFiles[0]:', newFiles && newFiles[0] ? { name: newFiles[0].name, type: newFiles[0].type, size: newFiles[0].size } : 'empty');
+      var encodedFiles = newFiles.length ? await filesToBase64(newFiles) : [];
+      console.log('[ENCODE_DONE] encodedFiles count:', encodedFiles.length);
+
+      // Hapus foto yang di-mark deleted dari Drive (non-fatal)
+      var deletedNc = Array.isArray(draft._deletedFotoUrls) ? draft._deletedFotoUrls : [];
+      for (var _dj = 0; _dj < deletedNc.length; _dj++) {
+        try { await api('DELETE_DRIVE_FILE', { file_url: deletedNc[_dj] }); } catch(e) {}
+      }
+
+      return {
+        result_id:          f.result_id,
+        final_status:       'Non Comply',
+        deskripsi_temuan:   draft.deskripsi_temuan  || '',
+        lokasi_temuan:      draft.lokasi_temuan      || '',
+        existing_foto_urls: typeof draft.foto_urls === 'string' ? draft.foto_urls : '',
+        new_files:          encodedFiles,
+      };
+    }));
+
+    await api('VERIFY_FINDINGS', {
+      period_id: periodId,
+      agenda_id: agendaId,
+      updates:   updates,
+    });
+
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    clearCache('GET_FINDINGS_BY_AGENDA');
+    closeModal('verif-preview-modal');
+    toast('Verifikasi berhasil. Temuan bisa ditindaklanjuti auditee.', 'success');
+    navigateTo('mytask');
+  } catch(err) {
+    toast(err.message, 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i data-lucide="shield-check" style="width:13px;height:13px"></i> Konfirmasi & Simpan';
+      lucide.createIcons(btn);
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  SUB-PAGE: ISI TPP (Auditee)
+// ════════════════════════════════════════════════════════════
+
+async function _renderIsiTppPage(container, task, period) {
+  container.innerHTML =
+    '<div class="page-loader"><div class="spinner dark"></div><span>Memuat...</span></div>';
+
+  try {
+    // Cek apakah sudah ada TPP sebelumnya (resubmit setelah reject)
+    var existingItems = await api('GET_TPP_ITEMS', {
+      period_id: period.period_id,
+      result_id: task.result_id,
+    });
+    var log = await api('GET_APPROVAL_LOG', {
+      period_id: period.period_id,
+      result_id: task.result_id,
+    });
+
+    var f          = task.finding;
+    var isResubmit = existingItems.length > 0;
+
+    // Render history reject kalau ada
+    var historyHtml = _renderApprovalHistory(log, 'TPP');
+
+    container.innerHTML =
+      _subPageHeader(
+        'Isi TPP — ' + escHtml(task.agenda ? task.agenda.dept : ''),
+        '#' + (f ? f.nomor_persyaratan + '.' + f.check_item_no : '')
+      ) +
+
+      // Info temuan
+      '<div class="card mb-16"><div class="card-body" style="padding:14px 16px">' +
+        '<div style="display:flex;gap:10px;align-items:flex-start">' +
+          statusBadge(f ? f.status : '') +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:600">' + escHtml(f ? f.deskripsi_temuan : '') + '</div>' +
+            '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">' +
+              escHtml(task.agenda ? task.agenda.dept : '') +
+              ' · #' + (f ? f.nomor_persyaratan + '.' + f.check_item_no : '') +
+            '</div>' +
+            (f && f.foto_urls
+              ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">' +
+                  '<div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:6px;letter-spacing:.04em">FOTO BUKTI TEMUAN</div>' +
+                  '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+                    f.foto_urls.split(',').filter(Boolean).map(function(url) {
+                      return '<a href="' + escHtml(url) + '" target="_blank" ' +
+                        'class="btn btn-outline btn-sm" style="font-size:11px">' +
+                        '<i data-lucide="image" style="width:11px;height:11px"></i> Lihat Foto</a>';
+                    }).join('') +
+                  '</div>' +
+                '</div>'
+              : '') +
+          '</div>' +
+        '</div>' +
+      '</div></div>' +
+
+      historyHtml +
+
+      // Form TPP
+      '<div class="card mb-16"><div class="card-body">' +
+        '<div style="font-size:13px;font-weight:600;margin-bottom:14px">Tindakan Perbaikan & Pencegahan</div>' +
+
+        // Target date (satu per finding)
+        '<div class="form-group">' +
+          '<label class="form-label">Target Penyelesaian <span class="required">*</span></label>' +
+          '<input class="form-control" type="date" id="tpp-target-date" ' +
+            'value="' + (f && f.target_date ? f.target_date : '') + '" style="max-width:200px">' +
+        '</div>' +
+
+        // Corrections
+        '<div style="font-size:12px;font-weight:700;color:var(--text-muted);letter-spacing:.06em;margin-bottom:8px">CORRECTION (Tindakan Segera)</div>' +
+        '<div id="tpp-corrections">' +
+          _renderTppItemInputs('CORRECTION', isResubmit
+            ? existingItems.filter(function(i) { return i.tipe === 'CORRECTION'; })
+            : [{ deskripsi: '' }]) +
+        '</div>' +
+        '<button class="btn btn-ghost btn-sm" onclick="_addTppItem(\'CORRECTION\')" style="margin-bottom:16px">' +
+          '<i data-lucide="plus" style="width:13px;height:13px"></i> Tambah Koreksi' +
+        '</button>' +
+
+        // Corrective Actions
+        '<div style="font-size:12px;font-weight:700;color:var(--text-muted);letter-spacing:.06em;margin-bottom:8px">CORRECTIVE ACTION (Jangka Panjang)</div>' +
+        '<div id="tpp-ca">' +
+          _renderTppItemInputs('CORRECTIVE_ACTION', isResubmit
+            ? existingItems.filter(function(i) { return i.tipe === 'CORRECTIVE_ACTION'; })
+            : [{ deskripsi: '' }]) +
+        '</div>' +
+        '<button class="btn btn-ghost btn-sm" onclick="_addTppItem(\'CORRECTIVE_ACTION\')" style="margin-bottom:16px">' +
+          '<i data-lucide="plus" style="width:13px;height:13px"></i> Tambah Tindakan Pencegahan' +
+        '</button>' +
+
+      '</div></div>' +
+
+      '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+        '<button class="btn btn-outline" onclick="_backToMyTask()">Batal</button>' +
+        '<button class="btn btn-primary" id="tpp-submit-btn" ' +
+          'onclick="singleClick(this,function(){ _submitTpp(\'' +
+            task.result_id + '\',\'' + task.agenda_id + '\',\'' + period.period_id + '\') })">' +
+          '<i data-lucide="send" style="width:14px;height:14px"></i> Submit TPP' +
+        '</button>' +
+      '</div>';
+
+    lucide.createIcons();
+  } catch(err) {
+    container.innerHTML = _subPageHeader('Isi TPP', '') +
+      '<div class="empty-state"><div class="empty-desc">' + escHtml(err.message) + '</div></div>';
+    lucide.createIcons();
+  }
+}
+
+function _renderTppItemInputs(tipe, items) {
+  return items.map(function(item, i) {
+    return '<div class="form-group" style="display:flex;gap:8px;align-items:flex-start" id="tpp-item-' + tipe + '-' + i + '">' +
+      '<textarea class="form-control" id="tpp-input-' + tipe + '-' + i + '" rows="2" ' +
+        'placeholder="' + (tipe === 'CORRECTION' ? 'Tindakan perbaikan segera...' : 'Rencana tindakan korektif jangka panjang...') + '">' +
+        escHtml(item.deskripsi || '') +
+      '</textarea>' +
+      (i > 0
+        ? '<button class="btn btn-ghost btn-icon" style="flex-shrink:0;margin-top:4px" ' +
+            'onclick="document.getElementById(\'tpp-item-' + tipe + '-' + i + '\').remove()">' +
+            '<i data-lucide="x" style="width:13px;height:13px;color:var(--text-muted)"></i>' +
+          '</button>'
+        : '<div style="width:32px"></div>') +
+    '</div>';
+  }).join('');
+}
+
+function _addTppItem(tipe) {
+  var container = document.getElementById('tpp-' + (tipe === 'CORRECTION' ? 'corrections' : 'ca'));
+  if (!container) return;
+  var existing = container.querySelectorAll('[id^="tpp-item-' + tipe + '-"]');
+  var nextIdx  = existing.length;
+  var div = document.createElement('div');
+  div.innerHTML = _renderTppItemInputs(tipe, [{ deskripsi: '' }]);
+  // Re-index
+  div.querySelectorAll('[id]').forEach(function(el) {
+    el.id = el.id.replace(tipe + '-0', tipe + '-' + nextIdx);
+  });
+  container.appendChild(div.firstElementChild);
+  lucide.createIcons();
+}
+
+async function _submitTpp(resultId, agendaId, periodId) {
+  var targetDate = document.getElementById('tpp-target-date') ?
+    document.getElementById('tpp-target-date').value : '';
+  if (!targetDate) return toast('Target penyelesaian wajib diisi.', 'error');
+
+  var items = [];
+  // Kumpulkan corrections
+  document.querySelectorAll('[id^="tpp-input-CORRECTION-"]').forEach(function(el) {
+    var val = el.value.trim();
+    if (val) items.push({ tipe: 'CORRECTION', deskripsi: val });
+  });
+  // Kumpulkan corrective actions
+  document.querySelectorAll('[id^="tpp-input-CORRECTIVE_ACTION-"]').forEach(function(el) {
+    var val = el.value.trim();
+    if (val) items.push({ tipe: 'CORRECTIVE_ACTION', deskripsi: val });
+  });
+
+  if (!items.length) return toast('Isi minimal satu correction atau corrective action.', 'error');
+
+  var btn      = document.getElementById('tpp-submit-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:13px;height:13px;border-width:2px"></div> Mengirim...';
+
+  try {
+    await api('SUBMIT_TPP', {
+      period_id:   periodId,
+      result_id:   resultId,
+      agenda_id:   agendaId,
+      items:       items,
+      target_date: targetDate,
+    });
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    clearCache('GET_APPROVAL_LOG');
+    clearCache('GET_TPP_ITEMS');
+    toast('TPP berhasil disubmit. Menunggu approval Dept Head.', 'success');
+    navigateTo('mytask');
+  } catch(err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="send" style="width:14px;height:14px"></i> Submit TPP';
+    lucide.createIcons();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  SUB-PAGE: UPLOAD IMPLEMENTASI (Auditee)
+// ════════════════════════════════════════════════════════════
+
+async function _renderUploadImplPage(container, task, period) {
+  container.innerHTML =
+    '<div class="page-loader"><div class="spinner dark"></div><span>Memuat...</span></div>';
+
+  try {
+    var tppItems = await api('GET_TPP_ITEMS', {
+      period_id: period.period_id,
+      result_id: task.result_id,
+    });
+    var log = await api('GET_APPROVAL_LOG', {
+      period_id: period.period_id,
+      result_id: task.result_id,
+    });
+    var f = task.finding;
+
+    var historyHtml = _renderApprovalHistory(log, 'IMPL');
+
+    var itemsHtml = tppItems.map(function(item, i) {
+      // Selalu tampilkan upload zone di OPEN_IMPL — auditee bisa upload / re-upload
+      // Data sebelumnya ditampilkan sebagai referensi di atas upload zone
+      var hadPreviousSubmit = !!item.impl_submitted_at;
+      var alreadySubmitted  = false; // OPEN_IMPL = selalu perlu (re)submit
+
+      return '<div class="card mb-12">' +
+        '<div class="card-body">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
+            '<span class="badge ' + (item.tipe === 'CORRECTION' ? 'badge-blue' : 'badge-purple') + '" style="font-size:10px">' +
+              (item.tipe === 'CORRECTION' ? 'Koreksi' : 'Tindakan Pencegahan') +
+            '</span>' +
+            (alreadySubmitted ? '<span class="badge badge-emerald" style="font-size:10px">✓ Sudah disubmit</span>' : '') +
+          '</div>' +
+          '<div style="font-size:13px;margin-bottom:12px">' + escHtml(item.deskripsi) + '</div>' +
+
+          // Tampilkan bukti sebelumnya jika ada (referensi — tidak dihapus saat reject)
+          (hadPreviousSubmit && item.impl_foto_urls
+            ? '<div class="card mb-8" style="background:var(--bg);border:1px solid var(--border)">' +
+                '<div class="card-body" style="padding:10px 12px">' +
+                  '<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;display:flex;align-items:center;gap:4px">' +
+                    '<i data-lucide="history" style="width:11px;height:11px"></i> ' +
+                    'Bukti sebelumnya:' +
+                  '</div>' +
+                  '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                    item.impl_foto_urls.split(',').filter(Boolean).map(function(url) {
+                      return '<a href="' + url + '" target="_blank" class="btn btn-outline btn-sm">' +
+                        '<i data-lucide="image" style="width:12px;height:12px"></i> Lihat</a>';
+                    }).join('') +
+                  '</div>' +
+                  (item.impl_keterangan
+                    ? '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">' +
+                        escHtml(item.impl_keterangan) +
+                      '</div>'
+                    : '') +
+                '</div>' +
+              '</div>'
+            : '') +
+          // Upload zone — selalu tampil agar auditee bisa upload / re-upload
+          '<div class="upload-zone" id="impl-zone-' + item.tpp_item_id + '">' +
+            '<i data-lucide="camera" style="width:24px;height:24px;opacity:.3;margin-bottom:6px"></i>' +
+            '<div class="upload-text">' + (hadPreviousSubmit ? 'Upload ulang bukti' : 'Upload foto/dokumen bukti') + '</div>' +
+          '</div>' +
+          '<div class="upload-previews" id="impl-preview-' + item.tpp_item_id + '"></div>' +
+          '<div class="form-group" style="margin-top:10px">' +
+            '<label class="form-label" style="font-size:12px">Keterangan (opsional)</label>' +
+            '<textarea class="form-control" id="impl-ket-' + item.tpp_item_id + '" rows="2" ' +
+              'placeholder="Jelaskan apa yang sudah dilakukan...">' +
+              escHtml(item.impl_keterangan || '') +
+            '</textarea>' +
+          '</div>' +
+          '<button class="btn btn-primary btn-sm" id="impl-btn-' + item.tpp_item_id + '" ' +
+            'onclick="singleClick(this,function(){ _submitImplItem(\'' +
+              item.tpp_item_id + '\',\'' + task.result_id + '\',\'' +
+              task.agenda_id + '\',\'' + period.period_id + '\') })">' +
+            '<i data-lucide="upload" style="width:13px;height:13px"></i> ' + (hadPreviousSubmit ? 'Upload Ulang' : 'Submit Bukti') +
+          '</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    container.innerHTML =
+      _subPageHeader(
+        'Upload Implementasi — ' + escHtml(task.agenda ? task.agenda.dept : ''),
+        '#' + (f ? f.nomor_persyaratan + '.' + f.check_item_no : '') +
+        ' · Target: ' + formatDate(f ? f.target_date : '')
+      ) +
+      historyHtml +
+      itemsHtml;
+
+    // Setup upload zones — selalu untuk semua item di OPEN_IMPL
+    tppItems.forEach(function(item) {
+      setupUploadZone('impl-zone-' + item.tpp_item_id, 'impl-preview-' + item.tpp_item_id);
+    });
+
+    lucide.createIcons();
+  } catch(err) {
+    container.innerHTML = _subPageHeader('Upload Implementasi', '') +
+      '<div class="empty-state"><div class="empty-desc">' + escHtml(err.message) + '</div></div>';
+    lucide.createIcons();
+  }
+}
+
+async function _submitImplItem(tppItemId, resultId, agendaId, periodId) {
+  var zone  = document.getElementById('impl-zone-' + tppItemId);
+  var files = zone && zone._getFiles ? zone._getFiles() : [];
+  if (!files.length) return toast('Upload minimal 1 file bukti.', 'error');
+
+  var ket    = document.getElementById('impl-ket-' + tppItemId);
+  var btn    = document.getElementById('impl-btn-' + tppItemId);
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:2px"></div> Mengirim...';
+
+  try {
+    var b64files = await filesToBase64(files);
+    var period   = window._myTaskPeriod;
+
+    await api('SUBMIT_IMPLEMENTATION', {
+      period_id:   periodId,
+      result_id:   resultId,
+      agenda_id:   agendaId,
+      tpp_item_id: tppItemId,
+      files:       b64files,
+      keterangan:  ket ? ket.value.trim() : '',
+    });
+
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    toast('Bukti implementasi berhasil dikirim.', 'success');
+
+    // Re-render halaman
+    var task = window._myTaskList[window._myTaskReturnIdx];
+    if (task) _renderUploadImplPage(document.getElementById('page-content'), task, period);
+  } catch(err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="upload" style="width:13px;height:13px"></i> Submit Bukti';
+    lucide.createIcons();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  SUB-PAGE: APPROVAL (Dept Head / Auditor / Koordinator)
+// ════════════════════════════════════════════════════════════
+
+async function _renderApprovalPage(container, task, period) {
+  container.innerHTML =
+    '<div class="page-loader"><div class="spinner dark"></div><span>Memuat...</span></div>';
+
+  try {
+    var tppItems = await api('GET_TPP_ITEMS', {
+      period_id: period.period_id,
+      result_id: task.result_id,
+    });
+    var log = await api('GET_APPROVAL_LOG', {
+      period_id: period.period_id,
+      result_id: task.result_id,
+    });
+    var f = task.finding;
+    var stage   = task.type === 'APPROVAL_TPP' ? 'TPP' : 'IMPL';
+    var isTPP   = stage === 'TPP';
+    var isKoord = App.profile.isKoordinator;
+
+    var historyHtml = _renderApprovalHistory(log, stage);
+
+    // Konten yang di-approve
+    var contentHtml = isTPP
+      ? '<div class="card mb-16"><div class="card-body">' +
+          '<div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:10px">RENCANA TPP</div>' +
+          tppItems.map(function(item) {
+            return '<div style="padding:10px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px">' +
+              '<span class="badge ' + (item.tipe === 'CORRECTION' ? 'badge-blue' : 'badge-purple') + '" style="font-size:10px;margin-bottom:6px">' +
+                (item.tipe === 'CORRECTION' ? 'Koreksi' : 'Tindakan Pencegahan') +
+              '</span>' +
+              '<div style="font-size:13px">' + escHtml(item.deskripsi) + '</div>' +
+            '</div>';
+          }).join('') +
+          '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">' +
+            '<i data-lucide="calendar" style="width:12px;height:12px;vertical-align:middle"></i>' +
+            ' Target: <strong>' + formatDate(f ? f.target_date : '') + '</strong>' +
+          '</div>' +
+          (f && f.foto_urls
+            ? '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">' +
+                '<div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:6px;letter-spacing:.04em">FOTO BUKTI TEMUAN ASLI</div>' +
+                '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+                  f.foto_urls.split(',').filter(Boolean).map(function(url) {
+                    return '<a href="' + escHtml(url) + '" target="_blank" class="btn btn-outline btn-sm" style="font-size:11px">' +
+                      '<i data-lucide="image" style="width:11px;height:11px"></i> Lihat Foto Temuan</a>';
+                  }).join('') +
+                '</div>' +
+              '</div>'
+            : '') +
+        '</div></div>'
+      : '<div class="card mb-16"><div class="card-body">' +
+          (f && f.foto_urls
+            ? '<div style="margin-bottom:12px;padding:10px;background:var(--bg);border-radius:6px;border:1px solid var(--border)">' +
+                '<div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:6px;letter-spacing:.04em">FOTO TEMUAN ASLI</div>' +
+                '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+                  f.foto_urls.split(',').filter(Boolean).map(function(url) {
+                    return '<a href="' + escHtml(url) + '" target="_blank" class="btn btn-outline btn-sm" style="font-size:11px">' +
+                      '<i data-lucide="image" style="width:11px;height:11px"></i> Lihat Foto Temuan</a>';
+                  }).join('') +
+                '</div>' +
+              '</div>'
+            : '') +
+          '<div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:10px">BUKTI IMPLEMENTASI</div>' +
+          tppItems.map(function(item) {
+            return '<div style="padding:10px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px">' +
+              '<span class="badge ' + (item.tipe === 'CORRECTION' ? 'badge-blue' : 'badge-purple') + '" style="font-size:10px;margin-bottom:6px">' +
+                (item.tipe === 'CORRECTION' ? 'Koreksi' : 'Tindakan Pencegahan') +
+              '</span>' +
+              '<div style="font-size:13px;margin-bottom:8px">' + escHtml(item.deskripsi) + '</div>' +
+              (item.impl_keterangan
+                ? '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">' + escHtml(item.impl_keterangan) + '</div>'
+                : '') +
+              (item.impl_foto_urls
+                ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                    item.impl_foto_urls.split(',').filter(Boolean).map(function(url) {
+                      return '<a href="' + url + '" target="_blank" class="btn btn-outline btn-sm">' +
+                        '<i data-lucide="image" style="width:12px;height:12px"></i> Lihat Bukti</a>';
+                    }).join('') +
+                  '</div>'
+                : '<div style="font-size:12px;color:var(--rose)">Belum ada bukti diupload.</div>') +
+            '</div>';
+          }).join('') +
+        '</div></div>';
+
+    container.innerHTML =
+      _subPageHeader(
+        (isTPP ? 'Approval TPP' : 'Approval Implementasi') +
+          ' — ' + escHtml(task.agenda ? task.agenda.dept : ''),
+        '#' + (f ? f.nomor_persyaratan + '.' + f.check_item_no : '') +
+        ' · ' + escHtml(f ? f.deskripsi_temuan : '')
+      ) +
+
+      // Info temuan
+      '<div class="card mb-16"><div class="card-body" style="padding:12px 16px">' +
+        statusBadge(f ? f.status : '') + ' ' +
+        '<span style="font-size:13px;font-weight:600">' + escHtml(f ? f.deskripsi_temuan : '') + '</span>' +
+      '</div></div>' +
+
+      contentHtml +
+      historyHtml +
+      skipHtml +
+
+      // Komentar + tombol approve/reject
+      '<div class="card"><div class="card-body">' +
+        '<div class="form-group">' +
+          '<label class="form-label">Komentar <span style="font-size:11px;color:var(--text-muted)">(wajib jika menolak)</span></label>' +
+          '<textarea class="form-control" id="apr-komentar" rows="2" placeholder="Tulis komentar..."></textarea>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button class="btn btn-outline" onclick="_backToMyTask()">Kembali</button>' +
+          '<button class="btn btn-danger btn-sm" id="apr-reject-btn" ' +
+            'onclick="singleClick(this,function(){ _processApproval(\'' +
+              task.result_id + '\',\'' + task.agenda_id + '\',\'' +
+              period.period_id + '\',\'' + stage + '\',\'' + (task.level || '') + '\',\'REJECTED\') })">' +
+            '<i data-lucide="x-circle" style="width:13px;height:13px"></i> Reject' +
+          '</button>' +
+          '<button class="btn btn-success" id="apr-approve-btn" ' +
+            'onclick="singleClick(this,function(){ _processApproval(\'' +
+              task.result_id + '\',\'' + task.agenda_id + '\',\'' +
+              period.period_id + '\',\'' + stage + '\',\'' + (task.level || '') + '\',\'APPROVED\') })">' +
+            '<i data-lucide="check-circle" style="width:13px;height:13px"></i> Approve' +
+          '</button>' +
+        '</div>' +
+      '</div></div>';
+
+    lucide.createIcons();
+  } catch(err) {
+    container.innerHTML = _subPageHeader('Approval', '') +
+      '<div class="empty-state"><div class="empty-desc">' + escHtml(err.message) + '</div></div>';
+    lucide.createIcons();
+  }
+}
+
+async function _processApproval(resultId, agendaId, periodId, stage, level, action) {
+  var komentar = document.getElementById('apr-komentar') ?
+    document.getElementById('apr-komentar').value.trim() : '';
+  if (action === 'REJECTED' && !komentar) {
+    return toast('Isi komentar alasan penolakan terlebih dahulu.', 'error');
+  }
+
+  var btnId   = action === 'APPROVED' ? 'apr-approve-btn' : 'apr-reject-btn';
+  var btn     = document.getElementById(btnId);
+  btn.disabled = true;
+
+  try {
+    await api('PROCESS_APPROVAL', {
+      period_id: periodId,
+      result_id: resultId,
+      agenda_id: agendaId,
+      action:    action,
+      komentar:  komentar,
+      // stage & level dihapus — derive dari finding_status di server
+    });
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    clearCache('GET_FINDINGS_BY_AGENDA');
+    clearCache('GET_TPP_ITEMS');
+    clearCache('GET_APPROVAL_LOG');
+    toast(action === 'APPROVED' ? 'Berhasil di-approve.' : 'Ditolak. Auditee akan diberitahu.', 'success');
+    navigateTo('mytask');
+  } catch(err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+  }
+}
+
+// ── Mass Approve ─────────────────────────────────────────────
+
+async function _massApproveAll(stage) {
+  var tasks = (window._myTaskList || []).filter(function(t) {
+    return t.type === 'APPROVAL_' + stage;
+  });
+  if (!tasks.length) return;
+
+  var ok = await showConfirm({
+    title:       'Mass Approve ' + stage,
+    message:     'Approve ' + tasks.length + ' finding sekaligus?',
+    confirmText: 'Approve Semua',
+  });
+  if (!ok) return;
+
+  var period = window._myTaskPeriod;
+  // Mass approve hanya tersedia untuk Koordinator (bar-nya hanya dirender untuk Koordinator)
+  var level  = 'Koordinator';
+
+  try {
+    await api('MASS_APPROVE', {
+      period_id:  period.period_id,
+      result_ids: tasks.map(function(t) { return t.result_id; }),
+      agenda_ids: tasks.map(function(t) { return t.agenda_id; }),
+      // stage & level dihapus — derive dari finding_status di server
+    });
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    toast(tasks.length + ' finding berhasil di-approve.', 'success');
+    navigateTo('mytask');
+  } catch(err) { toast(err.message, 'error'); }
+}
+
+// ── Approval History ─────────────────────────────────────────
+
+function _renderApprovalHistory(log, stage) {
+  var relevant = (log || []).filter(function(l) {
+    return l.stage === stage && l.action !== 'SUBMITTED';
+  });
+  if (!relevant.length) return '';
+
+  return '<div class="card mb-16" style="border:1px solid var(--border)">' +
+    '<div class="card-body" style="padding:12px 16px">' +
+      '<div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:10px;letter-spacing:.06em">RIWAYAT APPROVAL</div>' +
+      relevant.map(function(l) {
+        var isApproved = l.action === 'APPROVED';
+        var isSkipped  = l.skipped === true || l.skipped === 'TRUE';
+        return '<div style="display:flex;gap:10px;align-items:flex-start;padding:6px 0;' +
+          'border-bottom:1px solid var(--border)">' +
+          '<div style="width:20px;height:20px;border-radius:50%;flex-shrink:0;' +
+            'background:' + (isApproved ? 'var(--emerald,#10b981)' : 'var(--rose,#f43f5e)') + ';' +
+            'display:flex;align-items:center;justify-content:center;margin-top:1px">' +
+            '<i data-lucide="' + (isApproved ? 'check' : 'x') + '" ' +
+              'style="width:11px;height:11px;color:#fff"></i>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:12px;font-weight:600">' +
+              escHtml(l.level) +
+              (isSkipped ? ' <span class="badge badge-amber" style="font-size:10px">Skip</span>' : '') +
+            '</div>' +
+            '<div style="font-size:11px;color:var(--text-muted)">' +
+              escHtml(l.by_email ? l.by_email.split('@')[0] : '') +
+              ' · ' + formatDate(l.at) +
+            '</div>' +
+            (l.komentar
+              ? '<div style="font-size:12px;margin-top:3px;color:' +
+                  (isApproved ? 'var(--text)' : 'var(--rose)') + '">' +
+                  escHtml(l.komentar) +
+                '</div>'
+              : '') +
+            (isSkipped && l.skip_reason
+              ? '<div style="font-size:11px;color:var(--amber,#f59e0b);margin-top:2px">' +
+                  'Alasan skip: ' + escHtml(l.skip_reason) + '</div>'
+              : '') +
+          '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+  '</div>';
+}
+</script>
