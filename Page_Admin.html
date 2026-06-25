@@ -364,6 +364,15 @@ async function saveArea(areaId) {
       await api('CREATE_AREA', data);
     }
     clearCache('GET_AREAS');
+    clearCache('GET_AGENDAS_BY_PERIOD');
+    clearCache('GET_ALL_FINDINGS_BY_PERIOD');
+    // Reset profile agar isAuditee / isDeptHead langsung reflect perubahan
+    if (App.profile) {
+      try {
+        var freshProfile = await api('GET_PROFILE');
+        if (freshProfile && freshProfile.email) App.profile = Object.assign(App.profile, freshProfile);
+      } catch(e) {}
+    }
     toast(areaId ? 'Area berhasil diperbarui.' : 'Area berhasil ditambahkan.', 'success');
     closeModal('area-modal');
     loadAdminAreas(document.getElementById('admin-tab-content'));
@@ -556,9 +565,23 @@ function openChecklistModal(item) {
         '</div>' +
         '<div class="form-group">' +
           '<label class="form-label">Aspek <span class="required">*</span></label>' +
-          '<select class="form-control" id="cl-aspek">' +
-            ['Plan','Do','Check','Action'].map(function(a) { return '<option ' + (item && item.aspek === a ? 'selected' : '') + '>' + a + '</option>'; }).join('') +
-          '</select>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;padding:6px 0">' +
+            ['Plan','Do','Check','Action'].map(function(a) {
+              var currentAspeks = item ? (item.aspek || '').split(/[&,\/]/).map(function(x){ return x.trim(); }) : [];
+              var checked = currentAspeks.indexOf(a) !== -1;
+              return '<label style="display:inline-flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;' +
+                'padding:4px 10px;border-radius:6px;border:1px solid var(--border);' +
+                'background:' + (checked ? 'rgba(59,130,246,.1)' : 'transparent') + ';' +
+                'color:' + (checked ? 'var(--blue,#3b82f6)' : 'var(--text)') + '">' +
+                '<input type="checkbox" id="cl-aspek-' + a.toLowerCase() + '" value="' + a + '" ' +
+                  (checked ? 'checked' : '') + ' ' +
+                  'onchange="_updateAspekCheckboxStyle(this)" ' +
+                  'style="width:13px;height:13px;accent-color:var(--blue,#3b82f6)">' +
+                a +
+              '</label>';
+            }).join('') +
+          '</div>' +
+          '<div class="form-hint">Pilih satu atau lebih aspek PDCA untuk check item ini.</div>' +
         '</div>' +
       '</div>' +
       '<div class="form-group">' +
@@ -614,6 +637,23 @@ function toggleKategoriField() {
   grp.style.cssText = isKhusus ? 'opacity:1;pointer-events:all' : 'opacity:.4;pointer-events:none';
 }
 
+function _updateAspekCheckboxStyle(el) {
+  var label = el.parentElement;
+  if (!label) return;
+  label.style.background  = el.checked ? 'rgba(59,130,246,.1)' : 'transparent';
+  label.style.color       = el.checked ? 'var(--blue,#3b82f6)'  : 'var(--text)';
+  label.style.borderColor = el.checked ? 'var(--blue,#3b82f6)'  : 'var(--border)';
+}
+
+function _getSelectedAspek() {
+  var selected = [];
+  ['Plan','Do','Check','Action'].forEach(function(a) {
+    var el = document.getElementById('cl-aspek-' + a.toLowerCase());
+    if (el && el.checked) selected.push(a);
+  });
+  return selected.join(' & ');
+}
+
 async function saveChecklistItem(itemId) {
   var btn     = document.getElementById('cl-save-btn');
   var restore = btnLoading(btn, itemId ? 'Menyimpan...' : 'Menambahkan...', 'cl-modal');
@@ -622,13 +662,14 @@ async function saveChecklistItem(itemId) {
     tipe:               tipe,
     kategori:           tipe === 'KHUSUS' ? (document.getElementById('cl-kategori') ? document.getElementById('cl-kategori').value : '') : '',
     nomor:              Number(document.getElementById('cl-nomor')        ? document.getElementById('cl-nomor').value         : 0),
-    aspek:              document.getElementById('cl-aspek')               ? document.getElementById('cl-aspek').value         : '',
+    aspek:              _getSelectedAspek(),
     persyaratan:        document.getElementById('cl-persyaratan')         ? document.getElementById('cl-persyaratan').value.trim() : '',
     check_item:         document.getElementById('cl-item')                ? document.getElementById('cl-item').value.trim()       : '',
     standar_check_item: document.getElementById('cl-standar') ? document.getElementById('cl-standar').value.trim() : '',
     labels:             document.getElementById('cl-labels')  ? document.getElementById('cl-labels').value.trim()  : '',
   };
   if (!data.persyaratan || !data.check_item || !data.nomor) { restore(); return toast('Nomor, persyaratan, dan check item wajib diisi.', 'error'); }
+  if (!data.aspek) { restore(); return toast('Pilih minimal satu aspek.', 'error'); }
   try {
     if (itemId) {
       var aktif = document.getElementById('cl-aktif') ? document.getElementById('cl-aktif').value === 'true' : true;
@@ -691,7 +732,7 @@ function openBulkChecklistModal() {
           'Labels (opsional)' +
         '</span>' +
         '<span style="color:var(--text-muted);white-space:nowrap">Aspek valid</span>' +
-        '<span style="font-size:12px">Plan &nbsp;·&nbsp; Do &nbsp;·&nbsp; Check &nbsp;·&nbsp; Action</span>' +
+        '<span style="font-size:12px">Plan &nbsp;·&nbsp; Do &nbsp;·&nbsp; Check &nbsp;·&nbsp; Action &nbsp;·&nbsp; <span style="color:var(--text-muted)">atau kombinasi: "Check & Action", "Plan & Do"</span></span>' +
         '<span style="color:var(--text-muted);white-space:nowrap">Nomor</span>' +
         '<span style="font-size:12px">Di-generate otomatis, lanjutan dari data existing tipe+kategori yang sama.</span>' +
         '<span style="color:var(--text-muted);white-space:nowrap">Format</span>' +
@@ -761,8 +802,10 @@ function _parseBulkChecklistLines() {
     if (cols.length === 0 || cols.every(function(c) { return !c; })) continue;
 
     var aspekRaw = (cols[0] || '').trim();
+    // Capitalize setiap kata agar "check & action" → "Check & Action"
+    var aspekNorm = aspekRaw.replace(/\b\w/g, function(c) { return c.toUpperCase(); });
     rows.push({
-      aspek:              aspekRaw.charAt(0).toUpperCase() + aspekRaw.slice(1).toLowerCase(),
+      aspek:              aspekNorm,
       persyaratan:        (cols[1] || '').replace(/\n/g, ' ').trim(),
       check_item:         (cols[2] || '').trim(),
       standar_check_item: (cols[3] || '').trim(),
@@ -778,12 +821,10 @@ function previewBulkChecklist() {
   var preview = document.getElementById('bcl-preview');
   if (!preview) return;
   if (!items.length) { preview.innerHTML = ''; return; }
-  var validAspek = ['Plan','Do','Check','Action'];
   var lastPersyaratan = null;
   var rows = items.map(function(t, i) {
     var warn = '';
     if (!t.aspek || !t.persyaratan || !t.check_item) warn = '⚠ aspek/persyaratan/check item kosong';
-    else if (!validAspek.includes(t.aspek)) warn = '⚠ aspek tidak valid: ' + t.aspek;
     var isNew = t.persyaratan !== lastPersyaratan;
     lastPersyaratan = t.persyaratan;
     return '<tr style="font-size:12px' + (warn ? ';color:var(--rose)' : '') + (isNew && i > 0 ? ';border-top:2px solid var(--border)' : '') + '">' +
@@ -1745,6 +1786,11 @@ function _renderStep1AreaList() {
   }).join('');
 }
 
+function _ag1CloseAuditorDD(areaId) {
+  var dd = document.getElementById('ag1-dd-' + areaId);
+  if (dd) dd.style.display = 'none';
+}
+
 function _ag1AuditorDropdownItems(areaId) {
   var state    = window._agendaState;
   var area     = state.areas.find(function(a) { return a.area_id === areaId; });
@@ -1752,18 +1798,39 @@ function _ag1AuditorDropdownItems(areaId) {
   var searchEl = document.getElementById('ag1-search-' + areaId);
   var q        = searchEl ? searchEl.value.toLowerCase() : '';
 
-  return auditors.filter(function(u) {
+  var selectedCount = area ? area.auditorEmails.length : 0;
+
+  var items = auditors.filter(function(u) {
     return !q || u.nama.toLowerCase().includes(q);
   }).map(function(u) {
     var checked = area && area.auditorEmails.includes(u.email);
     return '<div onclick="_ag1ToggleAuditor(\'' + escHtml(areaId) + '\',\'' + escHtml(u.email) + '\')" ' +
       'style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;' +
-        (checked ? 'background:var(--bg)' : '') + '">' +
+        (checked ? 'background:rgba(59,130,246,.06)' : '') + ';' +
+        'transition:background .1s" ' +
+      'onmouseover="if(!this.style.background||this.style.background===\'\')this.style.background=\'var(--bg)\'" ' +
+      'onmouseout="this.style.background=' + "'" + (checked ? 'rgba(59,130,246,.06)' : '') + "'" + '">' +
       '<i data-lucide="' + (checked ? 'check-square' : 'square') + '" ' +
-        'style="width:14px;height:14px;flex-shrink:0;color:' + (checked ? 'var(--blue)' : 'var(--text-muted)') + '"></i>' +
+        'style="width:14px;height:14px;flex-shrink:0;color:' + (checked ? 'var(--blue,#3b82f6)' : 'var(--text-muted)') + '"></i>' +
       '<span>' + escHtml(u.nama) + '</span>' +
     '</div>';
   }).join('') || '<div style="padding:10px 12px;font-size:12px;color:var(--text-muted)">Tidak ada auditor.</div>';
+
+  // Footer tombol Selesai
+  var footer =
+    '<div style="padding:8px 12px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg)">' +
+      '<span style="font-size:11px;color:var(--text-muted)">' +
+        (selectedCount > 0 ? selectedCount + ' dipilih' : 'Belum ada dipilih') +
+      '</span>' +
+      '<button onclick="event.stopPropagation();_ag1CloseAuditorDD(\'' + escHtml(areaId) + '\')" ' +
+        'style="font-size:12px;font-weight:600;padding:4px 12px;border-radius:6px;' +
+          'border:1px solid var(--blue,#3b82f6);background:var(--blue,#3b82f6);' +
+          'color:#fff;cursor:pointer;line-height:1.4">' +
+        'Selesai' +
+      '</button>' +
+    '</div>';
+
+  return items + footer;
 }
 
 function _ag1RenderSelectedAuditors(areaId) {
