@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audit System</title>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <div id="sidebar">
+
+    <!-- Logo + Toggle -->
+    <div class="sidebar-logo">
+      <div class="logo-icon">
+        <i data-lucide="shield-check" style="width:18px;height:18px;color:#fff"></i>
+      </div>
+      <div class="logo-text-wrap">
+        <div class="logo-text">Audit System</div>
+        <div class="logo-sub">IMS - PT Sayap Mas Utama</div>
+      </div>
+      <button class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle Sidebar">
+        <i data-lucide="panel-left-close" id="sidebar-toggle-icon" style="width:16px;height:16px"></i>
+      </button>
+    </div>
+
+    <!-- Nav -->
+    <nav class="sidebar-nav" id="sidebar-nav"></nav>
+
+    <!-- User Info -->
+    <div class="sidebar-user" id="sidebar-user">
+      <div class="user-avatar">?</div>
+    </div>
+  </div>
+
+  <!-- ── Main ─────────────────────────────────────────────── -->
+  <div id="main">
+    <div id="page-content">
+      <div class="page-loader">
+        <div class="spinner dark"></div>
+        <span>Memuat aplikasi...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Mobile Bottom Nav -->
+<div id="mobile-nav"></div>
+
+<!-- Toast Container -->
+<div id="toast-container"></div>
+
+<?!= include('JavaScript'); ?>
+<?!= include('Page_Landing'); ?>
+<?!= include('Page_Dashboard'); ?>
+<?!= include('Page_Admin'); ?>
+<?!= include('Page_Audit'); ?>
+<?!= include('Page_MyTask'); ?>
+
+<script>
+  var _initPage  = '<?= initPage ?>';
+  var _initKey   = '<?= initKey ?>';
+  var _initParam = '<?= initParam ?>';
+</script>
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    lucide.createIcons();
+    initApp();
+  });
+</script>
+</body>
+</html>
