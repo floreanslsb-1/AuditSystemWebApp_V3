@@ -151,8 +151,12 @@ function _auditUnloadHandler(e) {
 //  This fixes the cross-group collision bug.
 // ============================================================
 
-var LOCK_POLL_MS = 60000;
+var LOCK_POLL_MS = 5000;
 var _lockPollTimer = null;
+
+// Card grid polling — cek status agenda tiap 30 detik saat card grid visible
+var CARD_POLL_MS   = 30000;
+var _cardPollTimer = null;
 
 // In-memory lock state: { "<groupKey>": { locked_by, status, nomor_persyaratan } }
 window._auditLockState = window._auditLockState || {};
@@ -168,8 +172,76 @@ function _stopLockPolling() {
   if (_lockPollTimer) { clearInterval(_lockPollTimer); _lockPollTimer = null; }
 }
 
+// ── Card grid polling ─────────────────────────────────────────
+function _startCardPolling(periodId) {
+  _stopCardPolling();
+  _cardPollTimer = setInterval(function() {
+    // Hanya jalan kalau: tab visible, card grid visible (bukan di dalam checklist)
+    if (document.visibilityState === 'hidden') return;
+    var grid = document.getElementById('audit-card-grid');
+    if (!grid || grid.style.display === 'none') return;
+    _refreshCardGrid(periodId);
+  }, CARD_POLL_MS);
+}
+function _stopCardPolling() {
+  if (_cardPollTimer) { clearInterval(_cardPollTimer); _cardPollTimer = null; }
+}
+
+async function _refreshCardGrid(periodId) {
+  var grid = document.getElementById('audit-card-grid');
+  if (!grid || grid.style.display === 'none') return;
+  try {
+    clearCache('GET_AGENDAS_BY_PERIOD');
+    var areas   = await cachedApi('GET_AREAS', {}, 60);
+    var agendas = await cachedApi('GET_AGENDAS_BY_PERIOD', { period_id: periodId }, 30);
+    var myAgendas = agendas.filter(function(a) { return _emailInCsv(a.auditor_emails, App.profile.email); });
+    grid.innerHTML = _buildCardsHtml(myAgendas, areas, { period_id: periodId });
+    lucide.createIcons();
+  } catch(e) { /* silent — jangan ganggu user */ }
+}
+
 async function _refreshLocks(agendaId, periodId) {
   try {
+    // Refresh data audit results hanya kalau tidak sedang ada draft aktif
+    // (agar tidak mengganggu auditor yang sedang mengisi)
+    var draft = window._auditDraft;
+    if (!draft || draft.activeGroupKey === null) {
+      clearCache('GET_AUDIT_RESULTS');
+      clearCache('GET_FINDINGS_BY_AGENDA');
+      // Re-render form untuk update progress auditor lain
+      var ctx = window._auditRenderCtx;
+      if (ctx) {
+        try {
+          var freshResults = await api('GET_AUDIT_RESULTS', {
+            period_id: periodId,
+            agenda_id: agendaId,
+          });
+          // Update resultMap
+          ctx.resultMap = {};
+          (freshResults || []).forEach(function(r) {
+            ctx.resultMap[r.result_id] = r.status;
+          });
+          // Update findingMap agar deskripsi + foto Non Comply ikut terupdate
+          ctx.findingMap = ctx.findingMap || {};
+          (freshResults || []).forEach(function(r) {
+            if (r.status === 'Non Comply' || r.status === 'NON_COMPLY') {
+              ctx.findingMap[r.result_id] = r;
+            } else {
+              // Kalau sudah berubah ke Comply, hapus dari findingMap
+              delete ctx.findingMap[r.result_id];
+            }
+          });
+          // Repaint semua group yang tidak di-lock oleh sendiri
+          ctx.groups.forEach(function(g) {
+            var gk = _groupKey(g);
+            var myLock = window._auditLockState[gk];
+            if (!myLock || myLock.locked_by !== App.profile.email) {
+              _repaintGroupItems(gk);
+            }
+          });
+        } catch(e) { /* silent */ }
+      }
+    }
     var locks = await api('GET_LOCKS', { period_id: periodId, agenda_id: agendaId });
 
     // BUG 4 FIX: sebelum rebuild, simpan dulu lock yang sedang dipegang sendiri
@@ -194,6 +266,12 @@ async function _refreshLocks(agendaId, periodId) {
     }
 
     _patchLockBadgesInDOM();
+
+    // Update "Dimulai X menit lalu" tanpa re-render seluruh card
+    var _agoEl = document.getElementById('audit-started-ago');
+    if (_agoEl && _agoEl.dataset.startedAt) {
+      _agoEl.textContent = timeAgo(_agoEl.dataset.startedAt);
+    }
   } catch(e) { /* silent — gagal poll tidak critical */ }
 }
 
@@ -277,24 +355,18 @@ async function _ensureLockForGroup(agendaId, periodId, groupKey, nomor) {
     return false;
   }
 
-  // Optimistically claim the lock locally
+  // Acquire lock ke server DULU — tidak optimistic, tunggu konfirmasi
+  var lockResult = await _acquireLock(agendaId, periodId, nomor);
+  if (!lockResult.ok) {
+    if (lockResult.lockedBy) {
+      toast('Persyaratan ini sedang dikerjakan ' + lockResult.lockedBy.split('@')[0] + '. Coba lagi sebentar.', 'warning', 6000);
+    }
+    return false;
+  }
+
+  // Server konfirmasi lock berhasil — baru claim locally
   _draftSetActiveGroup(groupKey);
   window._auditLockState[groupKey] = { locked_by: App.profile.email, status: 'LOCKED', nomor_persyaratan: nomor };
-
-  // Confirm with server in background
-  _acquireLock(agendaId, periodId, nomor).then(function(result) {
-    if (!result.ok) {
-      if (window._auditDraft && window._auditDraft.activeGroupKey === groupKey) {
-        window._auditDraft.activeGroupKey = null;
-        _persistAuditDraft();
-      }
-      delete window._auditLockState[groupKey];
-      if (result.lockedBy) {
-        toast('Persyaratan ini sedang dikerjakan ' + result.lockedBy.split('@')[0] + '. Isian dibatalkan.', 'warning', 6000);
-      }
-      _repaintGroupItems(groupKey);
-    }
-  });
 
   return true;
 }
@@ -331,19 +403,47 @@ Pages['audit'] = async function(container, params) {
     lucide.createIcons(); return;
   }
 
-  var cardsHtml = myAgendas.map(function(ag) {
+  // Simpan period_id di state supaya _backToAuditAreas bisa refresh
+  window._auditCurrentPeriodId = period.period_id;
+
+  container.innerHTML =
+    '<div class="page-hero mb-24">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">' +
+        '<div><h1 style="display:flex;align-items:center;gap:10px;margin:0 0 6px">' +
+          '<i data-lucide="clipboard-list" style="width:24px;height:24px"></i> Form Audit</h1>' +
+          '<p style="margin:0;font-size:13px;color:rgba(255,255,255,.65)">Periode: <strong style="color:#fff">' + escHtml(period.nama_periode) + '</strong> · ' + myAgendas.length + ' area ditugaskan</p>' +
+        '</div>' +
+        '<button id="audit-grid-refresh-btn" class="btn btn-outline btn-sm" style="color:#fff;border-color:rgba(255,255,255,.3);background:rgba(255,255,255,.08)" ' +
+          'onclick="singleClick(this, function(btn){ _manualRefreshCardGrid(btn) })">' +
+          '<i data-lucide="refresh-cw" style="width:13px;height:13px"></i> Refresh' +
+        '</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="audit-card-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">' +
+      _buildCardsHtml(myAgendas, areas, period) +
+    '</div>' +
+    '<div id="audit-checklist-panel"></div>';
+  lucide.createIcons();
+
+  // Mulai card grid polling
+  _startCardPolling(period.period_id);
+};
+
+// ── Helper: build cards HTML (reusable) ──────────────────────
+function _buildCardsHtml(myAgendas, areas, period) {
+  return myAgendas.map(function(ag) {
     var area    = areas.find(function(a) { return a.area_id === ag.area_id; });
     var dept    = escHtml(area ? area.dept : ag.area_id);
     var kat     = escHtml(area ? area.kategori : '');
     var statusInfo, actionLabel, actionIcon;
     if (ag.status === 'PLANNED') {
-      statusInfo = '<span class="badge badge-slate">Belum dimulai</span>';
+      statusInfo  = '<span class="badge badge-slate">Belum dimulai</span>';
       actionLabel = 'Mulai Audit'; actionIcon = 'play';
     } else if (ag.status === 'STARTED') {
-      statusInfo = statusBadge(ag.status);
+      statusInfo  = statusBadge(ag.status);
       actionLabel = 'Lanjutkan Audit'; actionIcon = 'arrow-right';
     } else {
-      statusInfo = statusBadge(ag.status);
+      statusInfo  = statusBadge(ag.status);
       actionLabel = 'Lihat Hasil'; actionIcon = 'eye';
     }
     var auditorChips = (ag.auditor_emails || '').split(',').map(function(e) { return e.trim(); }).filter(Boolean)
@@ -369,15 +469,19 @@ Pages['audit'] = async function(container, params) {
         '<i data-lucide="' + actionIcon + '" style="width:14px;height:14px"></i> ' + actionLabel +
       '</button></div></div>';
   }).join('');
+}
 
-  container.innerHTML =
-    '<div class="page-hero mb-24"><h1 style="display:flex;align-items:center;gap:10px">' +
-      '<i data-lucide="clipboard-list" style="width:24px;height:24px"></i> Form Audit</h1>' +
-      '<p>Periode: <strong style="color:#fff">' + escHtml(period.nama_periode) + '</strong> · ' + myAgendas.length + ' area ditugaskan</p></div>' +
-    '<div id="audit-card-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">' + cardsHtml + '</div>' +
-    '<div id="audit-checklist-panel"></div>';
-  lucide.createIcons();
-};
+// ── Manual refresh (tombol Refresh) ──────────────────────────
+async function _manualRefreshCardGrid(btn) {
+  var periodId = window._auditCurrentPeriodId;
+  if (!periodId) return;
+  var restore = btnLoading(btn, 'Refresh');
+  try {
+    await _refreshCardGrid(periodId);
+  } finally {
+    restore();
+  }
+}
 
 function _emptyState(icon, title, desc) {
   return '<div class="empty-state"><i data-lucide="' + icon + '" style="width:48px;height:48px;opacity:.3;margin-bottom:16px"></i>' +
@@ -407,6 +511,11 @@ async function selectAuditArea(areaId, periodId) {
     // BUG 5 FIX: Reset lock state saat pindah area.
     window._auditLockState = {};
 
+    // Stop card polling saat masuk checklist — lock polling yang akan jalan
+    _stopCardPolling();
+    var _refreshBtn = document.getElementById('audit-grid-refresh-btn');
+    if (_refreshBtn) _refreshBtn.style.display = 'none';
+
     await renderAuditChecklist(panel, agenda, areaId, periodId);
     _startLockPolling(agenda.agenda_id, periodId);
   } catch(err) {
@@ -434,18 +543,42 @@ function _skeletonChecklist() {
 }
 
 function _backToAuditAreas() {
+  // Cek active draft — harus disimpan/dibuang dulu
+  var _draft = window._auditDraft;
+  if (_draft && _draft.activeGroupKey !== null) {
+    toast('Simpan atau buang draf aktif sebelum kembali ke Daftar Area.', 'warning');
+    return;
+  }
+
   _stopLockPolling();
   _detachAuditUnloadGuard();
 
-  // BUG 5 FIX: Bersihkan lock state saat keluar dari area
-  window._auditLockState = {};
-  // Reset renderCtx agar _groupKey tidak menggunakan session lama
-  window._auditRenderCtx = null;
+  // Bersihkan floating elements dari DOM
+  ['audit-save-bar', 'audit-sticky-footer'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.remove();
+  });
 
-  var grid = document.getElementById('audit-card-grid');
-  if (grid) grid.style.display = 'grid';
+  // Reset semua state audit
+  window._auditLockState   = {};
+  window._auditRenderCtx   = null;
+  window._auditDraft       = { activeGroupKey: null, items: {} };
+  window._auditPendingFiles = {};
+
+  var grid  = document.getElementById('audit-card-grid');
   var panel = document.getElementById('audit-checklist-panel');
   if (panel) panel.innerHTML = '';
+
+  // Refresh card grid dengan data fresh (fix bug: card masih tampil status lama)
+  var periodId = window._auditCurrentPeriodId;
+  if (grid && periodId) {
+    grid.style.display = 'grid';
+    var _refreshBtn = document.getElementById('audit-grid-refresh-btn');
+    if (_refreshBtn) _refreshBtn.style.display = '';
+    _refreshCardGrid(periodId);    // async, silent on error
+    _startCardPolling(periodId);   // resume polling setelah kembali ke grid
+  } else if (grid) {
+    grid.style.display = 'grid';
+  }
 }
 
 async function _confirmStartAudit(areaId, periodId, dept) {
@@ -514,7 +647,7 @@ async function renderAuditChecklist(panel, agenda, areaId, periodId) {
     g.items.forEach(function(item, idx) {
       var m = _mergedStatus(_groupKey(g), item.nomor, idx + 1, resultMap, item.result_id);
       if (m.status) doneItems++;
-      if (m.status === 'NON_COMPLY') nonComply++;
+      if (m.status === 'NON_COMPLY' || m.status === 'Non Comply') nonComply++;
     });
   });
   var progressPct = totalItems > 0 ? Math.round(doneItems / totalItems * 100) : 0;
@@ -523,6 +656,24 @@ async function renderAuditChecklist(panel, agenda, areaId, periodId) {
     ? '<button class="btn btn-success btn-sm" id="finish-btn" onclick="singleClick(this,function(){ finishAudit(\'' + agenda.agenda_id + '\',\'' + periodId + '\') })">' +
         '<i data-lucide="check-circle" style="width:13px;height:13px"></i> Selesai & Minta Persetujuan</button>'
     : '';
+
+  // Ambil right edge dari sidebar agar footer tepat mulai setelah sidebar
+  var _isMobile = window.innerWidth < 768;
+  var _sidebarEl = !_isMobile && (document.querySelector('aside') || document.querySelector('nav'));
+  var _footerLeft = _sidebarEl ? Math.round(_sidebarEl.getBoundingClientRect().right) : 0;
+
+  var stickyFooter =
+    '<div id="audit-sticky-footer" style="position:fixed;bottom:0;left:' + _footerLeft + 'px;right:0;z-index:500;' +
+      'background:var(--surface,#fff);border-top:1px solid var(--border);' +
+      'padding:10px 24px;display:flex;align-items:center;gap:12px;box-shadow:0 -2px 12px rgba(0,0,0,.06)">' +
+      '<div style="flex:1;font-size:11px;color:var(--text-muted);line-height:1.5">' +
+        (agenda.status === 'STARTED'
+          ? '<i data-lucide="info" style="width:11px;height:11px;vertical-align:middle;margin-right:3px"></i>' +
+            'Setelah selesai, Anda akan melihat preview temuan dan dapat upload foto agreement bersama auditee. Masih bisa kembali untuk koreksi.'
+          : '') +
+      '</div>' +
+      finishBtn +
+    '</div>';
 
   var groupsHtml = groups.map(function(g) {
     return _renderGroup(g, agenda, periodId, resultMap, findingMap, isLocked, draft.activeGroupKey);
@@ -534,8 +685,8 @@ async function renderAuditChecklist(panel, agenda, areaId, periodId) {
     '<div class="card mb-16"><div class="card-body" style="padding:12px 16px">' +
       '<div class="flex items-center justify-between" style="flex-wrap:wrap;gap:8px">' +
         '<div><div class="fw-700">' + escHtml(agenda.dept) + '</div>' +
-          '<div class="text-sm text-muted">Dimulai ' + timeAgo(agenda.started_at) + ' · ' + escHtml(agenda.started_by ? agenda.started_by.split('@')[0] : '') + '</div></div>' +
-        '<div class="flex gap-8 items-center">' + statusBadge(agenda.status) + finishBtn + '</div>' +
+          '<div class="text-sm text-muted">Dimulai <span id="audit-started-ago" data-started-at="' + escAttr(agenda.started_at) + '">' + timeAgo(agenda.started_at) + '</span> · ' + escHtml(agenda.started_by ? agenda.started_by.split('@')[0] : '') + '</div></div>' +
+        '<div class="flex gap-8 items-center">' + statusBadge(agenda.status) + '</div>' +
       '</div>' +
       '<div style="margin-top:12px">' +
         '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:4px" id="audit-progress-label">' +
@@ -546,7 +697,8 @@ async function renderAuditChecklist(panel, agenda, areaId, periodId) {
             ';border-radius:3px;transition:width .4s ease"></div></div>' +
       '</div>' +
     '</div></div>' +
-    '<div id="checklist-groups" style="display:flex;flex-direction:column;gap:10px">' + groupsHtml + '</div>';
+    '<div id="checklist-groups" style="display:flex;flex-direction:column;gap:10px;padding-bottom:140px">' + groupsHtml + '</div>' +
+    stickyFooter;
 
   _renderFloatingSaveBar(agenda.agenda_id, periodId);
   lucide.createIcons();
@@ -624,11 +776,16 @@ function _mergedStatus(groupKey, nomor, ciNo, resultMap, resultId) {
   var draftKey  = _draftItemKey(groupKey, resultId);
   var drfItem   = window._auditDraft ? window._auditDraft.items[draftKey] : null;
   if (drfItem && drfItem.status) {
+    var _srvF = (window._auditRenderCtx && window._auditRenderCtx.findingMap && resultId)
+      ? window._auditRenderCtx.findingMap[resultId] : null;
+    var _savedCount = (_srvF && _srvF.foto_urls)
+      ? _srvF.foto_urls.split(',').filter(Boolean).length : 0;
     return {
       status: drfItem.status, fromDraft: true,
       deskripsi: drfItem.deskripsi_temuan || '',
       fileCount: (window._auditPendingFiles && window._auditPendingFiles[draftKey])
         ? window._auditPendingFiles[draftKey].length : 0,
+      savedFotoCount: _savedCount,
     };
   }
   return { status: srvStatus, fromDraft: false, deskripsi: '', fileCount: 0 };
@@ -740,7 +897,7 @@ function _renderCheckItem(gKey, item, ciNo, agenda, periodId, resultMap, finding
     var editBtn    = canEdit
       ? '<button title="Ubah status" style="display:inline-flex;align-items:center;padding:4px 6px;border-radius:6px;' +
           'border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;line-height:1" ' +
-          'onclick="_openEditStatusForm(\'' + item.item_id + '\',\'' + escAttr(gKey) + '\',' + item.nomor + ',' + ciNo + ',\'' + agenda.agenda_id + '\',\'' + periodId + '\',\'' + status + '\',\'' + (fromDraft ? '1' : '0') + '\')">' +
+          'onclick="_openEditStatusForm(\'' + escAttr(item.result_id) + '\',\'' + escAttr(gKey) + '\',\'' + agenda.agenda_id + '\',\'' + periodId + '\',\'' + status + '\',\'' + (fromDraft ? '1' : '0') + '\')">' +
           '<i data-lucide="pencil" style="width:12px;height:12px"></i>' +
         '</button>'
       : '';
@@ -757,19 +914,19 @@ function _renderCheckItem(gKey, item, ciNo, agenda, periodId, resultMap, finding
   } else {
     // FIX 2: compact action buttons on the right, professional style
     statusArea =
-      '<div class="ci-action-btns" style="display:flex;gap:6px;flex-shrink:0">' +
+      '<div class="ci-action-btns" style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">' +
         '<button style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;' +
           'border:1.5px solid var(--emerald,#10b981);background:transparent;color:var(--emerald,#10b981);' +
           'font-size:12px;font-weight:600;cursor:pointer;transition:background .15s" ' +
           'onmouseover="this.style.background=\'rgba(16,185,129,.1)\'" onmouseout="this.style.background=\'transparent\'" ' +
-          'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + item.item_id + '\',\'' + escAttr(gKey) + '\',' + item.nomor + ',' + ciNo + ',\'COMPLY\',\'' + agenda.agenda_id + '\',\'' + periodId + '\', btn) })">' +
+          'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + escAttr(item.result_id) + '\',\'' + escAttr(gKey) + '\',\'COMPLY\',\'' + agenda.agenda_id + '\',\'' + periodId + '\', btn) })">' +
           '<i data-lucide="check" style="width:13px;height:13px"></i>Comply' +
         '</button>' +
         '<button style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;' +
           'border:1.5px solid var(--rose,#f43f5e);background:transparent;color:var(--rose,#f43f5e);' +
           'font-size:12px;font-weight:600;cursor:pointer;transition:background .15s" ' +
           'onmouseover="this.style.background=\'rgba(244,63,94,.1)\'" onmouseout="this.style.background=\'transparent\'" ' +
-          'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + item.item_id + '\',\'' + escAttr(gKey) + '\',' + item.nomor + ',' + ciNo + ',\'NON_COMPLY\',\'' + agenda.agenda_id + '\',\'' + periodId + '\', btn) })">' +
+          'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + escAttr(item.result_id) + '\',\'' + escAttr(gKey) + '\',\'NON_COMPLY\',\'' + agenda.agenda_id + '\',\'' + periodId + '\', btn) })">' +
           '<i data-lucide="x" style="width:13px;height:13px"></i>Non Comply' +
         '</button>' +
       '</div>';
@@ -789,11 +946,14 @@ function _renderCheckItem(gKey, item, ciNo, agenda, periodId, resultMap, finding
       findingHtml =
         '<div style="margin-top:4px;font-size:12px">' +
           '<div style="line-height:1.5;color:var(--amber,#f59e0b)"><span style="font-weight:600">Deskripsi:</span> ' + escHtml(merged.deskripsi) + '</div>' +
-          (merged.fileCount
+          (merged.fileCount > 0 || merged.savedFotoCount > 0
             ? '<div style="display:inline-flex;align-items:center;gap:3px;margin-top:3px;' +
                 'font-size:11px;color:var(--amber,#f59e0b)">' +
                 '<i data-lucide="paperclip" style="width:10px;height:10px"></i>' +
-                merged.fileCount + ' foto (belum disimpan)</div>'
+                (merged.savedFotoCount > 0 ? merged.savedFotoCount + ' tersimpan' : '') +
+                (merged.savedFotoCount > 0 && merged.fileCount > 0 ? ' + ' : '') +
+                (merged.fileCount > 0 ? merged.fileCount + ' baru (belum disimpan)' : '') +
+              '</div>'
             : '') +
         '</div>';
     } else if (!fromDraft && srvFinding) {
@@ -801,11 +961,14 @@ function _renderCheckItem(gKey, item, ciNo, agenda, periodId, resultMap, finding
       var fotoUrls = String(srvFinding.foto_urls || '').split(',').filter(Boolean);
       var fotoHtml = '';
       if (fotoUrls.length) {
-        fotoHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">' +
+        fotoHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;max-width:100%;overflow:hidden">' +
           fotoUrls.map(function(url, idx) {
             return '<div style="position:relative;width:56px;height:56px;border-radius:6px;' +
               'overflow:hidden;border:1px solid var(--border);cursor:pointer;background:var(--bg)" ' +
               'onclick="_openFotoLightbox(\'' + escAttr(url) + '\')" title="Klik untuk perbesar">' +
+              '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
+                '<i data-lucide="image" style="width:20px;height:20px;opacity:.2"></i>' +
+              '</div>' +
               _renderDriveImg(url) +
               '<div style="display:none;width:100%;height:100%;align-items:center;' +
                 'justify-content:center">' +
@@ -845,7 +1008,7 @@ function _renderCheckItem(gKey, item, ciNo, agenda, periodId, resultMap, finding
               '<span>' + escHtml(item.standar_check_item) + '</span>' +
             '</div>'
           : '') +
-        '<div id="ci-finding-' + _cid + '">' + findingHtml + '</div>' +
+        '<div id="ci-finding-' + _cid + '" style="min-width:0;overflow:hidden">' + findingHtml + '</div>' +
       '</div>' +
       // Status / action buttons (right, vertically centered)
       '<div id="ci-status-' + _cid + '" style="flex-shrink:0;display:flex;align-items:center;padding-top:1px">' +
@@ -874,12 +1037,10 @@ function _buildFotoGrid(prefix, fotoUrlsStr, gKey, resultId, agendaId, periodId)
         return '<div style="position:relative;width:80px;height:80px;border-radius:8px;overflow:hidden;' +
           'border:1px solid var(--border);background:var(--bg);cursor:pointer" ' +
           'onclick="_openFotoLightbox(\'' + escAttr(url) + '\')">' +
-          '<img src="' + escAttr(url) + '" ' +
-            'style="width:100%;height:100%;object-fit:cover" ' +
-            'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">' +
-          '<div style="display:none;width:100%;height:100%;align-items:center;justify-content:center;' +
-            'font-size:10px;color:var(--text-muted);text-align:center;padding:4px">' +
-            '<i data-lucide="file" style="width:20px;height:20px;opacity:.4"></i></div>' +
+          '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
+            '<i data-lucide="image" style="width:24px;height:24px;opacity:.2"></i>' +
+          '</div>' +
+          _renderDriveImg(url) +
           // Tombol buka tab baru
           '<a href="' + escAttr(url) + '" target="_blank" ' +
             'onclick="event.stopPropagation()" ' +
@@ -912,6 +1073,17 @@ function _openFotoLightbox(url) {
   lb.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);' +
     'display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:16px';
   lb.onclick = function() { lb.remove(); };
+
+  // blob: URL dari pending file — tampilkan langsung tanpa server
+  if (url && url.indexOf('blob:') === 0) {
+    lb.innerHTML =
+      '<div style="position:relative;max-width:90vw;max-height:90vh">' +
+        '<img src="' + escHtml(url) + '" ' +
+          'style="max-width:90vw;max-height:85vh;object-fit:contain;border-radius:8px">' +
+      '</div>';
+    document.body.appendChild(lb);
+    return;
+  }
 
   // Pakai base64 dari cache kalau ada, atau load via server
   var cachedSrc = _driveImgCache[url] || '';
@@ -971,6 +1143,20 @@ function _repaintGroupItems(gKey) {
   }).join('');
   lucide.createIcons(itemsEl);
   _loadAllDriveImgs(itemsEl);
+
+  // Update group counter (4/5) di header group
+  var countEl = document.getElementById('rg-count-' + safeId);
+  if (countEl) {
+    var done    = g.items.filter(function(i, idx) {
+      return !!_mergedStatus(gKey, i.nomor, idx + 1, ctx.resultMap, i.result_id).status;
+    }).length;
+    var allDone = done === g.items.length;
+    countEl.textContent = done + '/' + g.items.length;
+    countEl.style.color = allDone ? 'var(--emerald,#10b981)' : 'var(--text-muted)';
+  }
+
+  // Update overall progress bar (14/15) di atas
+  _updateProgressBar();
 }
 
 function _repaintCheckItemRow(gKey, resultId, status, fromDraft) {
@@ -999,12 +1185,12 @@ function _repaintCheckItemRow(gKey, resultId, status, fromDraft) {
 
   var newStatusHtml;
   if (!merged.status) {
-    newStatusHtml = '<div class="ci-action-btns" style="display:flex;gap:6px;flex-shrink:0">' +
+    newStatusHtml = '<div class="ci-action-btns" style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">' +
       '<button style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;border:1.5px solid var(--emerald,#10b981);background:transparent;color:var(--emerald,#10b981);font-size:12px;font-weight:600;cursor:pointer" ' +
-        'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + item.item_id + '\',\'' + escAttr(gKey) + '\',' + item.nomor + ',' + item.check_item_no + ',\'COMPLY\',\'' + ctx.agenda.agenda_id + '\',\'' + ctx.periodId + '\', btn) })">' +
+        'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + escAttr(item.result_id) + '\',\'' + escAttr(gKey) + '\',\'COMPLY\',\'' + ctx.agenda.agenda_id + '\',\'' + ctx.periodId + '\', btn) })">' +
         '<i data-lucide="check" style="width:13px;height:13px"></i>Comply</button>' +
       '<button style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;border:1.5px solid var(--rose,#f43f5e);background:transparent;color:var(--rose,#f43f5e);font-size:12px;font-weight:600;cursor:pointer" ' +
-        'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + item.item_id + '\',\'' + escAttr(gKey) + '\',' + item.nomor + ',' + item.check_item_no + ',\'NON_COMPLY\',\'' + ctx.agenda.agenda_id + '\',\'' + ctx.periodId + '\', btn) })">' +
+        'onclick="var btn=this;singleClick(btn,function(){ submitCheckItem(\'' + escAttr(item.result_id) + '\',\'' + escAttr(gKey) + '\',\'NON_COMPLY\',\'' + ctx.agenda.agenda_id + '\',\'' + ctx.periodId + '\', btn) })">' +
         '<i data-lucide="x" style="width:13px;height:13px"></i>Non Comply</button></div>';
   } else {
     var badgeColor = isComply ? 'var(--emerald,#10b981)' : 'var(--rose,#f43f5e)';
@@ -1014,7 +1200,7 @@ function _repaintCheckItemRow(gKey, resultId, status, fromDraft) {
     var canEditR   = !ctx.isLocked && !gLocked;
     var editBtnR   = canEditR
       ? '<button title="Ubah status" style="display:inline-flex;align-items:center;padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;line-height:1" ' +
-          'onclick="_openEditStatusForm(\'' + item.item_id + '\',\'' + escAttr(gKey) + '\',' + item.nomor + ',' + item.check_item_no + ',\'' + ctx.agenda.agenda_id + '\',\'' + ctx.periodId + '\',\'' + merged.status + '\',\'' + (fd ? '1' : '0') + '\')">' +
+          'onclick="_openEditStatusForm(\'' + escAttr(item.result_id) + '\',\'' + escAttr(gKey) + '\',\'' + ctx.agenda.agenda_id + '\',\'' + ctx.periodId + '\',\'' + merged.status + '\',\'' + (fd ? '1' : '0') + '\')">' +
           '<i data-lucide="pencil" style="width:12px;height:12px"></i></button>'
       : '';
     newStatusHtml =
@@ -1042,11 +1228,14 @@ function _repaintCheckItemRow(gKey, resultId, status, fromDraft) {
         findingEl.innerHTML =
           '<div style="margin-top:4px;font-size:12px">' +
             '<div style="line-height:1.5;color:var(--amber,#f59e0b)"><span style="font-weight:600">Deskripsi:</span> ' + escHtml(merged.deskripsi) + '</div>' +
-            (merged.fileCount
+            (merged.fileCount > 0 || merged.savedFotoCount > 0
               ? '<div style="display:inline-flex;align-items:center;gap:3px;margin-top:3px;' +
                   'font-size:11px;color:var(--amber,#f59e0b)">' +
                   '<i data-lucide="paperclip" style="width:10px;height:10px"></i>' +
-                  merged.fileCount + ' foto (belum disimpan)</div>'
+                  (merged.savedFotoCount > 0 ? merged.savedFotoCount + ' tersimpan' : '') +
+                  (merged.savedFotoCount > 0 && merged.fileCount > 0 ? ' + ' : '') +
+                  (merged.fileCount > 0 ? merged.fileCount + ' baru (belum disimpan)' : '') +
+                '</div>'
               : '') +
           '</div>';
         lucide.createIcons(findingEl);
@@ -1056,11 +1245,14 @@ function _repaintCheckItemRow(gKey, resultId, status, fromDraft) {
           var fotoUrls2 = String(srvF2.foto_urls || '').split(',').filter(Boolean);
           var fotoHtml2 = '';
           if (fotoUrls2.length) {
-            fotoHtml2 = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">' +
+            fotoHtml2 = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;max-width:100%;overflow:hidden">' +
               fotoUrls2.map(function(url) {
                 return '<div style="position:relative;width:56px;height:56px;border-radius:6px;' +
                   'overflow:hidden;border:1px solid var(--border);cursor:pointer;background:var(--bg)" ' +
                   'onclick="_openFotoLightbox(\'' + escAttr(url) + '\')">' +
+                  '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
+                    '<i data-lucide="image" style="width:20px;height:20px;opacity:.2"></i>' +
+                  '</div>' +
                   _renderDriveImg(url) +
                   '<a href="' + escAttr(url) + '" target="_blank" onclick="event.stopPropagation()" ' +
                     'style="position:absolute;bottom:1px;right:1px;background:rgba(0,0,0,.5);' +
@@ -1072,17 +1264,12 @@ function _repaintCheckItemRow(gKey, resultId, status, fromDraft) {
             '</div>';
           }
           findingEl.innerHTML =
-            '<div style="margin-top:6px;padding:8px 10px;background:rgba(244,63,94,.05);' +
-              'border-radius:6px;font-size:12px;border-left:2px solid var(--rose,#f43f5e)">' +
-              '<div style="color:var(--rose,#f43f5e);font-weight:600;margin-bottom:4px;' +
-                'display:flex;align-items:center;gap:4px">' +
-                '<i data-lucide="triangle-alert" style="width:11px;height:11px"></i>Temuan tersimpan' +
-                (fotoUrls2.length ? '<span style="font-size:11px;font-weight:400;margin-left:4px">· ' + fotoUrls2.length + ' foto</span>' : '') +
-              '</div>' +
-              '<div style="color:var(--text-muted);line-height:1.5">' + escHtml(srvF2.deskripsi_temuan) + '</div>' +
+            '<div style="margin-top:4px;font-size:12px">' +
+              '<div style="line-height:1.5;color:var(--rose,#f43f5e)"><span style="font-weight:600">Deskripsi:</span> ' + escHtml(srvF2.deskripsi_temuan) + '</div>' +
               fotoHtml2 +
             '</div>';
           lucide.createIcons(findingEl);
+          _loadAllDriveImgs(findingEl);
         } else {
           findingEl.innerHTML = '';
         }
@@ -1124,7 +1311,7 @@ function _updateProgressBar() {
       totalItems++;
       var m = _mergedStatus(gKey, item.nomor, idx + 1, ctx.resultMap, item.result_id);
       if (m.status) doneItems++;
-      if (m.status === 'NON_COMPLY') nonComply++;
+      if (m.status === 'NON_COMPLY' || m.status === 'Non Comply') nonComply++;
     });
   });
   var pct   = totalItems > 0 ? Math.round(doneItems / totalItems * 100) : 0;
@@ -1138,30 +1325,48 @@ function _updateProgressBar() {
 //  submitCheckItem  — now passes gKey
 // ============================================================
 
-// Tidak ada perubahan di sini — pastikan ini sudah ada dan benar:
-async function submitCheckItem(itemId, gKey, nomor, ciNo, status, agendaId, periodId, btn) {
-  var locked = await _ensureLockForGroup(agendaId, periodId, gKey, nomor);
-  if (!locked) return;
+async function submitCheckItem(resultId, gKey, status, agendaId, periodId, btn) {
+  var ctx   = window._auditRenderCtx;
+  var _srGrp = ctx && ctx.groups.find(function(g) { return _groupKey(g) === gKey; });
+  var _srItm = _srGrp && _srGrp.items.find(function(i) { return i.result_id === resultId; });
+  if (!_srItm) return toast('Item tidak ditemukan.', 'error');
 
-  var _srCtx = window._auditRenderCtx;
-  var _srGrp = _srCtx && _srCtx.groups.find(function(g) { return _groupKey(g) === gKey; });
-  var _srItm = _srGrp && _srGrp.items.find(function(i) {
-    return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo);
-  });
-  var resultId = (_srItm && _srItm.result_id) || '';
+  // Guard: blok kalau sedang ada lock request yang berjalan
+  if (window._auditLockPending) {
+    toast('Sedang memproses, tunggu sebentar.', 'warning');
+    return;
+  }
+
+  // Guard: blok kalau group lain sudah aktif
+  var _draft = window._auditDraft;
+  if (_draft && _draft.activeGroupKey !== null && _draft.activeGroupKey !== gKey) {
+    var _ag = ctx && ctx.groups.find(function(g) { return _groupKey(g) === _draft.activeGroupKey; });
+    var _al = _ag ? escHtml(_ag.persyaratan.substring(0, 40)) : _draft.activeGroupKey;
+    toast('Selesaikan "' + _al + '..." dulu (Save atau Buang) sebelum mengerjakan persyaratan lain.', 'warning', 6000);
+    return;
+  }
+
+  // Set flag pending SEBELUM await — blok semua klik lain selama proses
+  window._auditLockPending = true;
+  try {
+    var locked = await _ensureLockForGroup(agendaId, periodId, gKey, Number(_srItm.nomor));
+    if (!locked) return;
+  } finally {
+    window._auditLockPending = false;
+  }
 
   _draftSetItem(gKey, resultId, {
-    item_id:           itemId,
+    item_id:           _srItm.item_id,
     result_id:         resultId,
-    nomor_persyaratan: Number(nomor),
-    check_item_no:     Number(ciNo),
+    nomor_persyaratan: Number(_srItm.nomor),
+    check_item_no:     Number(_srItm.check_item_no),
     status:            status
   });
   _repaintCheckItemRow(gKey, resultId, status, true);
   _renderFloatingSaveBar(agendaId, periodId);
 
   if (status === 'NON_COMPLY') {
-    _openDraftFindingForm(itemId, gKey, nomor, ciNo, resultId, agendaId, periodId);
+    _openDraftFindingForm(_srItm.item_id, gKey, _srItm.nomor, _srItm.check_item_no, resultId, agendaId, periodId);
   }
 }
 
@@ -1185,9 +1390,19 @@ function _renderFloatingSaveBar(agendaId, periodId) {
 
   var bar = document.createElement('div');
   bar.id  = 'audit-save-bar';
-  bar.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:1000;display:flex;gap:8px;align-items:center;' +
-    'background:var(--surface,#fff);padding:10px 14px;border-radius:12px;' +
-    'box-shadow:0 8px 28px rgba(0,0,0,.14);border:1px solid var(--border);max-width:420px';
+  var _footerH  = document.getElementById('audit-sticky-footer') ? 72 : 20;
+  var _isMob    = window.innerWidth < 768;
+  var _footerLeft2 = _isMob ? '0' : 'auto';
+  var _footerRight = '0';
+  var _bRadius  = _isMob ? '0' : '12px';
+  var _bBottom  = _isMob ? _footerH + 'px' : (_footerH + 8) + 'px';
+  var _bRight   = _isMob ? '0' : '20px';
+  bar.style.cssText = 'position:fixed;bottom:' + _bBottom + ';right:' + _bRight + ';' +
+    (_isMob ? 'left:0;' : '') +
+    'z-index:1000;display:flex;gap:8px;align-items:center;' +
+    'background:var(--surface,#fff);padding:10px 14px;border-radius:' + _bRadius + ';' +
+    'box-shadow:0 -2px 12px rgba(0,0,0,.1);border-top:1px solid var(--border);' +
+    (_isMob ? '' : 'border:1px solid var(--border);max-width:420px');
   bar.innerHTML =
     '<div style="flex:1;min-width:0;margin-right:4px">' +
       '<div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:1px">Draf aktif</div>' +
@@ -1235,6 +1450,12 @@ function _openDraftFindingForm(itemId, gKey, nomor, ciNo, resultId, agendaId, pe
           escHtml(existing.deskripsi_temuan || '') + '</textarea>' +
       '</div>' +
       '<div class="form-group">' +
+        '<label class="form-label">Lokasi Temuan <span class="required">*</span></label>' +
+        '<input type="text" class="form-control" id="ff-lokasi" ' +
+          'placeholder="e.g. Gudang B, Lantai 2, Area penyimpanan kimia" ' +
+          'value="' + escHtml(existing.lokasi_temuan || '') + '">' +
+      '</div>' +
+      '<div class="form-group">' +
         '<label class="form-label">Foto Bukti <span class="required">*</span>' +
           '<span id="ff-upload-hint" style="font-size:11px;color:var(--rose,#f43f5e);font-weight:400;margin-left:6px">' +
             (savedUrls.length || pendingFiles.length ? '' : '(wajib upload minimal 1 foto)') +
@@ -1249,7 +1470,7 @@ function _openDraftFindingForm(itemId, gKey, nomor, ciNo, resultId, agendaId, pe
       '</div>',
     footer:
       '<button class="btn btn-outline" onclick="closeModal(\'finding-form-modal\')">Batal</button>' +
-      '<button class="btn btn-danger" id="ff-save-btn" onclick="singleClick(this,function(){ _saveDraftFinding(\'' + escAttr(gKey) + '\',' + nomor + ',' + ciNo + ') })">' +
+      '<button class="btn btn-danger" id="ff-save-btn" onclick="singleClick(this,function(){ _saveDraftFinding(\'' + escAttr(gKey) + '\',\'' + escAttr(resultId) + '\') })">' +
         '<i data-lucide="triangle-alert" style="width:14px;height:14px"></i>Simpan ke Draf' +
       '</button>',
   });
@@ -1266,9 +1487,10 @@ function _openDraftFindingForm(itemId, gKey, nomor, ciNo, resultId, agendaId, pe
 
   var existingPending = (window._auditPendingFiles && window._auditPendingFiles[dKey]) || [];
 
-  // FIX 2: pendingFiles yang ada di memory harus ikut dihitung sebagai "foto ada"
-  // supaya validasi "minimal 1 foto" tidak salah
   window._ffExistingSavedUrls = savedUrls.slice();
+
+  // Load Drive image thumbnails yang ada di modal
+  setTimeout(function() { _loadAllDriveImgs(document.getElementById('finding-form-modal') || document); }, 300);
 
   // Set files ke upload zone setelah modal render
   setTimeout(function() {
@@ -1291,6 +1513,7 @@ function _openDraftFindingForm(itemId, gKey, nomor, ciNo, resultId, agendaId, pe
     }
   }, 50);
 }
+
 async function _deleteSavedFoto(url, idx, gKey, resultId, agendaId, periodId, prefix) {
   prefix = prefix || 'ff';
   var ok = await showConfirm({
@@ -1302,22 +1525,31 @@ async function _deleteSavedFoto(url, idx, gKey, resultId, agendaId, periodId, pr
   try { await api('DELETE_DRIVE_FILE', { file_url: url }); }
   catch(e) { toast('Gagal hapus file: ' + e.message, 'error'); return; }
 
-  // Update draft foto_urls — pakai resultId langsung
-  var existing = _draftGetItem(gKey, resultId) || {};
-  var urls = String(existing.foto_urls || '').split(',').filter(Boolean);
-  urls = urls.filter(function(u) { return u !== url; });
-  _draftSetItem(gKey, resultId, { foto_urls: urls.join(',') });
-
-  // Update snapshot
+  // Update snapshot DULU — jadi sumber kebenaran URL yang tersisa
   var snapKey = prefix === 'ff' ? '_ffExistingSavedUrls' : '_efExistingSavedUrls';
   if (window[snapKey]) window[snapKey] = window[snapKey].filter(function(u) { return u !== url; });
+  var remainingUrls = (window[snapKey] || []).join(',');
+
+  // Update draft pakai remainingUrls (bukan dari existing draft yang bisa kosong)
+  _draftSetItem(gKey, resultId, { foto_urls: remainingUrls });
+
+  // Persist ke sheet segera — tidak menunggu batch save
+  try {
+    await api('UPDATE_FINDING_FOTO_URLS', {
+      period_id: periodId,
+      result_id: resultId,
+      foto_urls: remainingUrls,
+    });
+  } catch(e) {
+    console.warn('[_deleteSavedFoto] gagal update sheet foto_urls:', e.message);
+    // Non-fatal — Drive sudah terhapus, sheet akan sync saat save audit berikutnya
+  }
 
   // Update DOM
   var savedContainer = document.getElementById(prefix + '-saved-files');
   if (savedContainer) {
     var items = Array.from(savedContainer.querySelectorAll(':scope > div'));
     if (items[idx]) items[idx].remove();
-    // Update hint
     var hint = document.getElementById(prefix + '-upload-hint');
     var zone = document.getElementById(prefix + '-upload-zone');
     if (hint && zone) {
@@ -1326,14 +1558,14 @@ async function _deleteSavedFoto(url, idx, gKey, resultId, agendaId, periodId, pr
       hint.textContent = (remaining + pendingCount) > 0 ? '' : '(wajib upload minimal 1 foto)';
     }
   }
-  // Update findingMap di renderCtx
+  // Update findingMap
   if (window._auditRenderCtx && window._auditRenderCtx.findingMap) {
     if (resultId && window._auditRenderCtx.findingMap[resultId]) {
-      var _fm = window._auditRenderCtx.findingMap[resultId];
-      _fm.foto_urls = (_fm.foto_urls || '').split(',').filter(Boolean)
-        .filter(function(u) { return u !== url; }).join(',');
+      window._auditRenderCtx.findingMap[resultId].foto_urls = remainingUrls;
     }
   }
+  // Repaint card di belakang modal agar thumbnail ikut hilang
+  if (gKey) _repaintGroupItems(gKey);
   toast('Foto dihapus.', 'success');
 }
 
@@ -1352,24 +1584,20 @@ function _validateImageFiles(files) {
   return true;
 }
 
-async function _saveDraftFinding(gKey, nomor, ciNo) {
+async function _saveDraftFinding(gKey, resultId) {
   var deskripsi = (document.getElementById('ff-deskripsi') || {}).value?.trim();
   if (!deskripsi) return toast('Deskripsi temuan wajib diisi.', 'error');
+  var lokasi = (document.getElementById('ff-lokasi') || {}).value?.trim();
+  if (!lokasi) return toast('Lokasi temuan wajib diisi.', 'error');
 
   var zone     = document.getElementById('ff-upload-zone');
   var newFiles = zone && zone._getFiles ? zone._getFiles() : [];
   if (newFiles.length && !_validateImageFiles(newFiles)) return;
   var savedCount = (window._ffExistingSavedUrls || []).length;
 
-  // FIX 3: hitung juga pendingFiles yang sudah ada dari sesi sebelumnya
-  // Skenario: user sudah upload foto di modal sebelumnya, buka modal lagi
-  // tapi tidak upload lagi — foto lama masih ada di _auditPendingFiles
-    var _sdCtx = window._auditRenderCtx;
+  var _sdCtx = window._auditRenderCtx;
   var _sdGrp = _sdCtx && _sdCtx.groups.find(function(g) { return _groupKey(g) === gKey; });
-  var _sdItm = _sdGrp && _sdGrp.items.find(function(i) {
-    return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo);
-  });
-  var resultId = (_sdItm && _sdItm.result_id) || '';
+  var _sdItm = _sdGrp && _sdGrp.items.find(function(i) { return i.result_id === resultId; });
 
   var dKey = _draftItemKey(gKey, resultId);
   var alreadyPending = (window._auditPendingFiles && window._auditPendingFiles[dKey])
@@ -1385,10 +1613,11 @@ async function _saveDraftFinding(gKey, nomor, ciNo) {
   _draftSetItem(gKey, resultId, {
     item_id:           (_sdItm && _sdItm.item_id) || '',
     result_id:         resultId,
-    nomor_persyaratan: Number(nomor),
-    check_item_no:     Number(ciNo),
+    nomor_persyaratan: _sdItm ? Number(_sdItm.nomor) : 0,
+    check_item_no:     _sdItm ? Number(_sdItm.check_item_no) : 0,
     status:            'NON_COMPLY',
     deskripsi_temuan:  deskripsi,
+    lokasi_temuan:     lokasi,
   });
   toast('Temuan ditambahkan ke draf. Klik "Simpan" untuk menyimpan ke sistem.', 'success');
   closeModal('finding-form-modal');
@@ -1397,7 +1626,16 @@ async function _saveDraftFinding(gKey, nomor, ciNo) {
   _renderFloatingSaveBar(_sdCtx && _sdCtx.agenda && _sdCtx.agenda.agenda_id, _sdCtx && _sdCtx.periodId);
 }
 
-async function _openEditStatusForm(itemId, gKey, nomor, ciNo, agendaId, periodId, currentStatus, fromDraftStr) {
+async function _openEditStatusForm(resultId, gKey, agendaId, periodId, currentStatus, fromDraftStr) {
+  var fromDraft = fromDraftStr === '1' || fromDraftStr === true;
+
+  // Find item sekali, pakai result_id
+  var _esCtx = window._auditRenderCtx;
+  var _esGrp = _esCtx && _esCtx.groups.find(function(g) { return _groupKey(g) === gKey; });
+  var _esItm = _esGrp && _esGrp.items.find(function(i) { return i.result_id === resultId; });
+  var nomor  = _esItm ? Number(_esItm.nomor)         : 0;
+  var ciNo   = _esItm ? Number(_esItm.check_item_no) : 0;
+  var itemId = _esItm ? _esItm.item_id               : '';
   // Untuk item yang sudah tersimpan (bukan draft), jangan lock dulu saat pencil diklik.
   // Lock hanya dibutuhkan kalau user betul-betul menyimpan perubahan dari modal.
   // Kalau item masih draft (fromDraftStr === '1'), tetap perlu ensureLock karena sudah ada draft aktif.
@@ -1430,7 +1668,10 @@ async function _openEditStatusForm(itemId, gKey, nomor, ciNo, agendaId, periodId
   var existing = _draftGetItem(gKey, _esRid) || {};
   if (!existing.deskripsi_temuan && _esCtx2 && _esCtx2.findingMap) {
     var srvFinding = _esRid ? _esCtx2.findingMap[_esRid] : null;
-    if (srvFinding) existing = { deskripsi_temuan: srvFinding.deskripsi_temuan };
+    if (srvFinding) existing = {
+      deskripsi_temuan: srvFinding.deskripsi_temuan,
+      lokasi_temuan:    srvFinding.lokasi_temuan || '',
+    };
   }
 
   if (isCurrentlyComply) {
@@ -1444,39 +1685,27 @@ async function _openEditStatusForm(itemId, gKey, nomor, ciNo, agendaId, periodId
     // Lock baru di-acquire setelah user konfirmasi "Lanjutkan"
     var lockedNow = await _ensureLockForGroup(agendaId, periodId, gKey, nomor);
     if (!lockedNow) return;
-    var _esCtx = window._auditRenderCtx;
-    var _esGrp = _esCtx && _esCtx.groups.find(function(g) { return _groupKey(g) === gKey; });
-    var _esItm = _esGrp && _esGrp.items.find(function(i) {
-      return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo);
-    });
-    var _esRid = (_esItm && _esItm.result_id) || '';
-    _draftSetItem(gKey, _esRid, { item_id: itemId, result_id: _esRid, nomor_persyaratan: Number(nomor), check_item_no: Number(ciNo), status: 'NON_COMPLY' });
-    _repaintCheckItemRow(gKey, _esRid, 'NON_COMPLY', true);
+    _draftSetItem(gKey, resultId, { item_id: itemId, result_id: resultId, nomor_persyaratan: Number(nomor), check_item_no: Number(ciNo), status: 'NON_COMPLY' });
+    _repaintCheckItemRow(gKey, resultId, 'NON_COMPLY', true);
     _renderFloatingSaveBar(agendaId, periodId);
-    _openDraftFindingForm(itemId, gKey, nomor, ciNo, _esRid, agendaId, periodId);
+    _openDraftFindingForm(itemId, gKey, nomor, ciNo, resultId, agendaId, periodId);
   } else {
     // Non Comply → open modal to edit finding
-    var _oeGrp3 = window._auditRenderCtx && window._auditRenderCtx.groups.find(function(g) { return _groupKey(g) === gKey; });
-    var _oeItm3 = _oeGrp3 && _oeGrp3.items.find(function(i) { return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo); });
-    var _oeRid3 = (_oeItm3 && _oeItm3.result_id) || '';
-    var dKeyEf       = _draftItemKey(gKey, _oeRid3);
-    var pendingEf    = (window._auditPendingFiles && window._auditPendingFiles[dKeyEf]) || [];
-    var draftEf      = _draftGetItem(gKey, _oeRid3) || {};
+    // Lock TIDAK di-acquire di sini — akan di-acquire di _saveEditedFinding saat user klik Simpan.
+    // Ini menghindari lock menggantung kalau user klik Batal tanpa simpan.
+    var dKeyEf    = _draftItemKey(gKey, resultId);
+    var pendingEf = (window._auditPendingFiles && window._auditPendingFiles[dKeyEf]) || [];
+    var draftEf   = _draftGetItem(gKey, resultId) || {};
     // Merge: draft lebih prioritas, fallback ke `existing` yang sudah diisi dari server di atas
     var initialDeskripsi = draftEf.deskripsi_temuan || existing.deskripsi_temuan || '';
-
+    var initialLokasi    = draftEf.lokasi_temuan    || (window._auditRenderCtx && window._auditRenderCtx.findingMap && window._auditRenderCtx.findingMap[resultId] ? window._auditRenderCtx.findingMap[resultId].lokasi_temuan : '') || '';
 
     // Tentukan foto_urls: prioritas draft → server finding
     var savedFotoUrls = draftEf.foto_urls || '';
     if (!savedFotoUrls && window._auditRenderCtx && window._auditRenderCtx.findingMap) {
       // Lookup pakai result_id, bukan nomor.ciNo
-      var _efCtx3 = window._auditRenderCtx;
-      var _efGrp3 = _efCtx3.groups.find(function(g) { return _groupKey(g) === gKey; });
-      var _efItm3 = _efGrp3 && _efGrp3.items.find(function(i) {
-        return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo);
-      });
-      var _efRid3 = _efItm3 && _efItm3.result_id;
-      var srvFindingEf = _efRid3 ? _efCtx3.findingMap[_efRid3] : null;
+      var srvFindingEf = (window._auditRenderCtx && window._auditRenderCtx.findingMap)
+        ? window._auditRenderCtx.findingMap[resultId] : null;
       if (srvFindingEf && srvFindingEf.foto_urls) {
         savedFotoUrls = srvFindingEf.foto_urls;
       }
@@ -1496,13 +1725,19 @@ async function _openEditStatusForm(itemId, gKey, nomor, ciNo, agendaId, periodId
             escHtml(initialDeskripsi) + '</textarea>' +
         '</div>' +
         '<div class="form-group">' +
+          '<label class="form-label">Lokasi Temuan <span class="required">*</span></label>' +
+          '<input type="text" class="form-control" id="ef-lokasi" ' +
+            'placeholder="e.g. Gudang B, Lantai 2, Area penyimpanan kimia" ' +
+            'value="' + escHtml(initialLokasi) + '">' +
+        '</div>' +
+        '<div class="form-group">' +
           '<label class="form-label">Foto Bukti <span class="required">*</span>' +
             '<span id="ef-upload-hint" style="font-size:11px;color:var(--rose,#f43f5e);font-weight:400;margin-left:6px">' +
               (totalFotoEf > 0 ? '' : '(wajib upload minimal 1 foto)') +
             '</span>' +
           '</label>' +
           // FIX: gunakan savedFotoUrls yang sudah digabung dari draft + server
-          _buildFotoGrid('ef', savedFotoUrls, gKey, _oeRid3, agendaId, periodId) +
+          _buildFotoGrid('ef', savedFotoUrls, gKey, resultId, agendaId, periodId) +
           // FIX: tampilkan label jika ada pending files yang belum tersimpan
           (pendingEf.length > 0
             ? '<div style="font-size:11px;color:var(--amber,#f59e0b);font-weight:600;margin-bottom:6px">' +
@@ -1519,15 +1754,15 @@ async function _openEditStatusForm(itemId, gKey, nomor, ciNo, agendaId, periodId
 
       footer:
         '<button class="btn btn-outline" style="margin-right:auto" ' +
-          'onclick="singleClick(this,function(){ _switchToComply(\'' + itemId + '\',\'' + escAttr(gKey) + '\',' + nomor + ',' + ciNo + ',\'' + agendaId + '\',\'' + periodId + '\') })">' +
+          'onclick="singleClick(this,function(){ _switchToComply(\'' + escAttr(resultId) + '\',\'' + escAttr(gKey) + '\',\'' + agendaId + '\',\'' + periodId + '\') })">' +
           '<i data-lucide="check" style="width:13px;height:13px"></i> Ubah ke Comply' +
         '</button>' +
-        '<button class="btn btn-outline" onclick="closeModal(\'edit-finding-modal\')">Batal</button>' +
-        '<button class="btn btn-danger" onclick="singleClick(this,function(){ _saveEditedFinding(\'' + escAttr(gKey) + '\',' + nomor + ',' + ciNo + ') })">' +
+        '<button class="btn btn-outline" onclick="_cancelEditFinding(\'' + escAttr(gKey) + '\',\'' + agendaId + '\',\'' + periodId + '\',\'' + nomor + '\')">Batal</button>' +
+        '<button class="btn btn-danger" onclick="singleClick(this,function(){ _saveEditedFinding(\'' + escAttr(gKey) + '\',\'' + escAttr(resultId) + '\') })">' +
           '<i data-lucide="save" style="width:13px;height:13px"></i> Simpan Temuan' +
         '</button>',
     });
-    setTimeout(function() { _loadAllDriveImgs(document.getElementById('edit-finding-modal')); }, 50);
+    setTimeout(function() { _loadAllDriveImgs(document.getElementById('edit-finding-modal') || document); }, 300);
     lucide.createIcons();
 
     // FIX: restore pending files ke upload zone — sama seperti modal ff
@@ -1569,35 +1804,49 @@ function _buildSavedFotosHtml(prefix, fotoUrlsStr, gKey, resultId, agendaId, per
     '</div></div>';
 }
 
-async function _switchToComply(itemId, gKey, nomor, ciNo, agendaId, periodId) {
+async function _switchToComply(resultId, gKey, agendaId, periodId) {
   closeModal('edit-finding-modal');
-  var _scGrp = window._auditRenderCtx && window._auditRenderCtx.groups.find(function(g){ return _groupKey(g) === gKey; });
-  var _scItem = _scGrp && _scGrp.items.find(function(i){
-    return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo);
-  });
-  var _scRid = (_scItem && _scItem.result_id) || '';
-  var dKey = _draftItemKey(gKey, _scRid);
+  var _scGrp  = window._auditRenderCtx && window._auditRenderCtx.groups.find(function(g){ return _groupKey(g) === gKey; });
+  var _scItem = _scGrp && _scGrp.items.find(function(i){ return i.result_id === resultId; });
+  var nomor   = _scItem ? Number(_scItem.nomor) : 0;
+
+  // Acquire lock agar group terkunci dan save bar muncul
+  var locked = await _ensureLockForGroup(agendaId, periodId, gKey, nomor);
+  if (!locked) return;
+
+  var dKey = _draftItemKey(gKey, resultId);
   if (window._auditPendingFiles && window._auditPendingFiles[dKey]) delete window._auditPendingFiles[dKey];
-  var resolvedItemId = ((_scItem && _scItem.item_id) || itemId) || '';
-  _draftSetItem(gKey, _scRid, { item_id: resolvedItemId, result_id: _scRid, nomor_persyaratan: Number(nomor), check_item_no: Number(ciNo), status: 'COMPLY', deskripsi_temuan: '' });
-  _repaintCheckItemRow(gKey, _scRid, 'COMPLY', true);
+  // Reset penuh — jangan pakai _draftSetItem (Object.assign) agar lokasi_temuan & foto_urls ikut terhapus
+  if (!window._auditDraft) window._auditDraft = { agendaId: agendaId, periodId: periodId, activeGroupKey: null, items: {} };
+  window._auditDraft.items[dKey] = {
+    item_id:           (_scItem && _scItem.item_id) || '',
+    result_id:         resultId,
+    nomor_persyaratan: nomor,
+    check_item_no:     _scItem ? Number(_scItem.check_item_no) : 0,
+    status:            'COMPLY',
+    deskripsi_temuan:  '',
+    lokasi_temuan:     '',
+    foto_urls:         '',
+  };
+  _persistAuditDraft();
+  _draftSetActiveGroup(gKey);  // ← wajib agar save bar muncul dan lock aktif
+  _repaintCheckItemRow(gKey, resultId, 'COMPLY', true);
   _renderFloatingSaveBar(agendaId, periodId);
 }
 
-async function _saveEditedFinding(gKey, nomor, ciNo) {
+async function _saveEditedFinding(gKey, resultId) {
   var deskripsi = (document.getElementById('ef-deskripsi') || {}).value?.trim();
   if (!deskripsi) return toast('Deskripsi temuan wajib diisi.', 'error');
+  var lokasi = (document.getElementById('ef-lokasi') || {}).value?.trim();
+  if (!lokasi) return toast('Lokasi temuan wajib diisi.', 'error');
 
-  // Resolve resultId dari renderCtx — single source of truth
-  var ctx = window._auditRenderCtx;
-  var _seGrp2 = ctx && ctx.groups.find(function(g){ return _groupKey(g) === gKey; });
-  var _seItm2 = _seGrp2 && _seGrp2.items.find(function(i){
-    return Number(i.nomor) === Number(nomor) && Number(i.check_item_no) === Number(ciNo);
-  });
-  var resolvedResultId = (_seItm2 && _seItm2.result_id) || '';
-  var resolvedItemId   = (_seItm2 && _seItm2.item_id)   || '';
+  var ctx    = window._auditRenderCtx;
+  var _seGrp = ctx && ctx.groups.find(function(g){ return _groupKey(g) === gKey; });
+  var _seItm = _seGrp && _seGrp.items.find(function(i){ return i.result_id === resultId; });
+  var nomor          = _seItm ? Number(_seItm.nomor)        : 0;
+  var ciNo           = _seItm ? Number(_seItm.check_item_no): 0;
+  var resolvedItemId = _seItm ? _seItm.item_id              : '';
 
-  // Acquire lock sekarang (saat user benar-benar menyimpan, bukan saat pencil diklik)
   var agendaId = ctx && ctx.agenda && ctx.agenda.agenda_id;
   var periodId = ctx && ctx.periodId;
   if (agendaId && periodId) {
@@ -1610,41 +1859,52 @@ async function _saveEditedFinding(gKey, nomor, ciNo) {
   var savedCount = (window._efExistingSavedUrls || []).length;
 
   if (!window._auditPendingFiles) window._auditPendingFiles = {};
-  var dKey = _draftItemKey(gKey, resolvedResultId);
-
-  // Hitung pending lama yang sudah ada sebelum modal ini dibuka
+  var dKey = _draftItemKey(gKey, resultId);
   var alreadyPendingEf = (window._auditPendingFiles[dKey] || []).length;
 
-  // Validasi: minimal 1 foto dari salah satu sumber
   if (newFiles.length + savedCount + alreadyPendingEf < 1) {
     return toast('Upload minimal 1 foto bukti temuan.', 'error');
   }
+  if (newFiles.length) window._auditPendingFiles[dKey] = newFiles;
 
-  // Kalau ada file baru, replace pending lama. Kalau tidak ada, pertahankan lama.
-  if (newFiles.length) {
-    window._auditPendingFiles[dKey] = newFiles;
-  }
-
-  if (!resolvedResultId) {
-    console.error('[saveEditedFinding] result_id tidak ditemukan untuk nomor=' + nomor + ' ciNo=' + ciNo);
-  }
-
-  _draftSetItem(gKey, resolvedResultId, {
+  _draftSetItem(gKey, resultId, {
     item_id:           resolvedItemId,
-    result_id:         resolvedResultId,
-    nomor_persyaratan: Number(nomor),
-    check_item_no:     Number(ciNo),
+    result_id:         resultId,
+    nomor_persyaratan: nomor,
+    check_item_no:     ciNo,
     status:            'NON_COMPLY',
     deskripsi_temuan:  deskripsi,
+    lokasi_temuan:     lokasi,
   });
-
   _draftSetActiveGroup(gKey);
 
   toast('Temuan diperbarui dalam draf.', 'success');
   closeModal('edit-finding-modal');
   window._efExistingSavedUrls = null;
-  _repaintCheckItemRow(gKey, resolvedResultId, 'NON_COMPLY', true);
+  _repaintCheckItemRow(gKey, resultId, 'NON_COMPLY', true);
   _renderFloatingSaveBar(agendaId, periodId);
+}
+
+async function _cancelEditFinding(gKey, agendaId, periodId, nomor) {
+  closeModal('edit-finding-modal');
+  // Kalau group ini sedang punya lock aktif (misal dari path draft),
+  // dan tidak ada draft item → release lock dan bersihkan activeGroupKey
+  var draft = window._auditDraft;
+  if (draft && draft.activeGroupKey === gKey) {
+    var prefix    = gKey + ':';
+    var hasDraft  = Object.keys(draft.items).some(function(k) { return k.indexOf(prefix) === 0; });
+    if (!hasDraft) {
+      // Tidak ada draft → lock tidak diperlukan, release
+      draft.activeGroupKey = null;
+      _persistAuditDraft();
+      delete window._auditLockState[gKey];
+      _renderFloatingSaveBar(agendaId, periodId);
+      _patchLockBadgesInDOM();
+      try {
+        if (nomor) await api('RELEASE_LOCK', { period_id: periodId, agenda_id: agendaId, nomor_persyaratan: Number(nomor) });
+      } catch(e) { console.warn('Release lock on cancel gagal (non-fatal):', e.message); }
+    }
+  }
 }
 
 // ============================================================
@@ -1666,13 +1926,17 @@ async function _saveRequirement(agendaId, periodId, btn) {
       var srvFinding = (window._auditRenderCtx && window._auditRenderCtx.findingMap && d.result_id)
         ? window._auditRenderCtx.findingMap[d.result_id]
         : null;
-      var existingFotoUrls = (d.foto_urls) || (srvFinding && srvFinding.foto_urls) || '';
+      // Untuk item Comply, jangan bawa foto lama dari server agar finding benar-benar terhapus
+      var existingFotoUrls = (d.status === 'COMPLY' || d.status === 'Comply')
+        ? ''
+        : (d.foto_urls) || (srvFinding && srvFinding.foto_urls) || '';
       return {
         result_id:          d.result_id || '',
         nomor_persyaratan:  d.nomor_persyaratan,
         check_item_no:      d.check_item_no,
         status:             d.status === 'COMPLY' ? 'Comply' : d.status === 'NON_COMPLY' ? 'Non Comply' : d.status,
         deskripsi_temuan:   d.deskripsi_temuan || '',
+        lokasi_temuan:      d.lokasi_temuan    || '',
         existing_foto_urls: existingFotoUrls,
       };
     });
@@ -1683,7 +1947,8 @@ async function _saveRequirement(agendaId, periodId, btn) {
   // (foto bisa ada di pendingFiles meski foto_urls di draft kosong)
   var missing = items.filter(function(it) {
     if (it.status !== 'Non Comply') return false;
-    if (!it.deskripsi_temuan) return true;  // tidak ada deskripsi
+    if (!it.deskripsi_temuan) return true;
+    if (!it.lokasi_temuan)    return true;  // tidak ada deskripsi
 
     // Cek apakah ada foto (pending atau saved)
     var dKey2 = _draftItemKey(gKey, it.result_id);
@@ -1758,8 +2023,11 @@ async function _saveRequirement(agendaId, periodId, btn) {
       restore(); return;
     }
 
-    // 1. Update resultMap + findingMap pakai `items` (bukan result.saved — tidak punya nomor_persyaratan)
+    // 1. Update resultMap + findingMap — foto_urls dari result.saved sudah include foto baru
     if (window._auditRenderCtx) {
+      var _savedMap = {};
+      (result.saved || []).forEach(function(s) { if (s.result_id) _savedMap[s.result_id] = s; });
+
       items.forEach(function(it) {
         if (!it.result_id) return;
         window._auditRenderCtx.resultMap[it.result_id] = it.status;
@@ -1767,10 +2035,12 @@ async function _saveRequirement(agendaId, periodId, btn) {
           if (window._auditRenderCtx.findingMap) delete window._auditRenderCtx.findingMap[it.result_id];
         } else if (it.status === 'Non Comply') {
           if (!window._auditRenderCtx.findingMap) window._auditRenderCtx.findingMap = {};
+          var _fotoUrls = (_savedMap[it.result_id] && _savedMap[it.result_id].foto_urls) || it.existing_foto_urls || '';
           window._auditRenderCtx.findingMap[it.result_id] = {
             result_id:        it.result_id,
             deskripsi_temuan: it.deskripsi_temuan || '',
-            foto_urls:        it.existing_foto_urls || '',
+            lokasi_temuan:    it.lokasi_temuan    || '',
+            foto_urls:        _fotoUrls,
           };
         }
       });
@@ -1847,23 +2117,92 @@ async function _confirmDiscardDraft(agendaId, periodId) {
 //  Finish audit + agreement modal
 // ============================================================
 
-function finishAudit(agendaId, periodId) { _openAgreementModal(agendaId, periodId); }
+function finishAudit(agendaId, periodId) {
+  // 1. Blok jika ada draft aktif
+  var _draftFa = window._auditDraft;
+  if (_draftFa && _draftFa.activeGroupKey !== null) {
+    toast('Simpan atau buang draf aktif sebelum menyelesaikan audit.', 'warning');
+    return;
+  }
+
+  // 2. Validasi semua check item terisi
+  var ctx = window._auditRenderCtx;
+  if (ctx) {
+    var unfilledItems = 0;
+    var firstUnfilledGroup = null;
+    ctx.groups.forEach(function(g) {
+      var gKey = _groupKey(g);
+      g.items.forEach(function(item, idx) {
+        var m = _mergedStatus(gKey, item.nomor, idx + 1, ctx.resultMap, item.result_id);
+        if (!m.status) {
+          unfilledItems++;
+          if (!firstUnfilledGroup) firstUnfilledGroup = g;
+        }
+      });
+    });
+
+    if (unfilledItems > 0) {
+      toast(unfilledItems + ' check item belum diisi. Lengkapi semua item sebelum menyelesaikan audit.', 'error');
+
+      // Scroll ke group pertama yang belum lengkap dan buka accordion-nya
+      if (firstUnfilledGroup) {
+        var safeId = 'rg-' + (firstUnfilledGroup.items[0] ? Number(firstUnfilledGroup.items[0].nomor) : 0) +
+          '-' + firstUnfilledGroup.items.length;
+        var groupEl = document.getElementById(safeId);
+        if (groupEl) {
+          groupEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          var details = groupEl.querySelector('details');
+          if (details) details.open = true;
+          // Highlight group sebentar
+          groupEl.style.boxShadow = '0 0 0 2px var(--rose,#f43f5e)';
+          setTimeout(function() { groupEl.style.boxShadow = ''; }, 2000);
+        }
+      }
+      return;
+    }
+  }
+
+  // 3. Semua OK — buka agreement modal
+  _openAgreementModal(agendaId, periodId);
+}
 
 function _openAgreementModal(agendaId, periodId) {
   createModal({
-    id: 'agreement-modal', title: 'Upload Bukti Agreement', size: 'modal-lg',
+    id: 'agreement-modal', title: 'Persetujuan Hasil Audit', size: 'modal-lg',
     body:
-      '<p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Upload foto bersama auditor dan auditee sebagai bukti bahwa hasil audit telah dikomunikasikan dan disepakati.</p>' +
-      '<div id="agr-findings-preview" style="margin-bottom:16px"></div>' +
-      '<div class="form-group"><label class="form-label">Nama Auditee yang Hadir <span class="required">*</span></label>' +
-        '<div class="form-hint" style="margin-bottom:8px">Tulis nama auditee yang hadir. Pisahkan dengan koma.</div>' +
-        '<textarea class="form-control" id="agr-auditee-names" rows="2" placeholder="Budi Santoso, Siti Aminah"></textarea></div>' +
-      '<div class="form-group"><label class="form-label">Foto Agreement <span class="required">*</span></label>' +
+      // 1. Hasil Audit — skeleton dulu, diisi async
+      '<div id="agr-hasil-section">' +
+        '<div class="skeleton" style="height:120px;border-radius:8px;margin-bottom:16px"></div>' +
+      '</div>' +
+      '<hr style="border:none;border-top:1px solid var(--border);margin:0 0 16px">' +
+
+      // 2. OFI ← BARU
+      '<div class="form-group">' +
+        '<label class="form-label">OFI (Opportunity for Improvement) <span class="required">*</span></label>' +
+        '<div class="form-hint" style="margin-bottom:8px">Tuliskan peluang perbaikan yang ditemukan. Tulis <strong>"-"</strong> jika tidak ada.</div>' +
+        '<textarea class="form-control" id="agr-ofi" rows="3" placeholder="Contoh: Prosedur sudah berjalan baik, namun pencatatan dapat ditingkatkan dengan..."></textarea>' +
+      '</div>' +
+
+      // 3. Nama auditee
+      '<div class="form-group">' +
+        '<label class="form-label">Nama Auditee yang Hadir <span class="required">*</span></label>' +
+        '<div class="form-hint" style="margin-bottom:8px">Tulis nama lengkap auditee yang hadir. Pisahkan dengan koma.</div>' +
+        '<textarea class="form-control" id="agr-auditee-names" rows="2" placeholder="Budi Santoso, Siti Aminah"></textarea>' +
+      '</div>' +
+      '<hr style="border:none;border-top:1px solid var(--border);margin:0 0 16px">' +
+      // 4. Info + upload foto
+      '<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">' +
+        'Upload foto bersama auditor dan auditee sebagai bukti bahwa hasil audit telah dikomunikasikan dan disepakati.' +
+      '</p>' +
+      '<div class="form-group">' +
+        '<label class="form-label">Foto Persetujuan Audit <span class="required">*</span></label>' +
         '<div class="upload-zone" id="agr-upload-zone" style="min-height:100px">' +
           '<i data-lucide="camera" style="width:28px;height:28px;opacity:.3;margin-bottom:8px"></i>' +
           '<div class="upload-text">Klik atau ambil foto bersama auditee</div>' +
-          '<div class="text-xs text-muted" style="margin-top:4px">JPG, PNG</div></div>' +
-        '<div class="upload-previews" id="agr-upload-preview"></div></div>',
+          '<div class="text-xs text-muted" style="margin-top:4px">JPG, PNG</div>' +
+        '</div>' +
+        '<div class="upload-previews" id="agr-upload-preview"></div>' +
+      '</div>',
     footer:
       '<button class="btn btn-outline" onclick="closeModal(\'agreement-modal\')">Batal</button>' +
       '<button class="btn btn-primary" id="agr-submit-btn" onclick="singleClick(this,function(){ _submitAgreementAndFinish(\'' + agendaId + '\',\'' + periodId + '\') })">' +
@@ -1871,63 +2210,145 @@ function _openAgreementModal(agendaId, periodId) {
   });
   lucide.createIcons();
   setupUploadZone('agr-upload-zone', 'agr-upload-preview');
+
+  // Fetch findings + all results secara paralel
   var period = App.activePeriod;
-  if (period) {
-    cachedApi('GET_FINDINGS_BY_AGENDA', { period_id: period.period_id, agenda_id: agendaId }, 10).then(function(findings) {
-      var el = document.getElementById('agr-findings-preview');
-      if (!el) return;
-      if (!findings.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">Tidak ada temuan di agenda ini.</div>'; return; }
-      el.innerHTML = '<div style="font-size:12px;font-weight:600;margin-bottom:8px">Ringkasan Temuan (' + findings.length + '):</div>' +
-        findings.map(function(f) {
-          return '<div style="margin-bottom:8px;padding:8px 10px;background:var(--bg);border-radius:6px;' +
-            'border-left:3px solid var(--rose,#f43f5e)">' +
-            '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
-              '<span class="badge badge-rose" style="font-size:10px">Non Comply</span>' +
-              '<span style="font-size:11px;font-weight:600;color:var(--text-muted)">' +
-                '#' + f.nomor_persyaratan + '.' + f.check_item_no +
-              '</span>' +
+  if (!period) return;
+  Promise.all([
+    cachedApi('GET_FINDINGS_BY_AGENDA', { period_id: period.period_id, agenda_id: agendaId }, 10),
+    cachedApi('GET_AUDIT_RESULTS',      { period_id: period.period_id, agenda_id: agendaId }, 10),
+  ]).then(function(res) {
+    var findings   = res[0] || [];
+    var allResults = res[1] || [];
+    var el = document.getElementById('agr-hasil-section');
+    if (!el) return;
+
+    var totalCount     = allResults.length;
+    var nonComplyCount = findings.length;
+    var complyCount    = totalCount - nonComplyCount;
+
+    // ── Summary chips ──────────────────────────────────────────
+    var html =
+      '<div style="font-size:13px;font-weight:700;margin-bottom:10px">Hasil Audit</div>' +
+      '<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">' +
+        '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;' +
+          'background:rgba(16,185,129,.1);color:var(--emerald,#10b981);font-size:12px;font-weight:600">' +
+          '<i data-lucide="check" style="width:12px;height:12px"></i>' + complyCount + ' Comply' +
+        '</span>' +
+        '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;' +
+          'background:rgba(244,63,94,.1);color:var(--rose,#f43f5e);font-size:12px;font-weight:600">' +
+          '<i data-lucide="x" style="width:12px;height:12px"></i>' + nonComplyCount + ' Non Comply' +
+        '</span>' +
+      '</div>';
+
+    // ── Non comply detail, grouped by persyaratan ───────────────
+    if (findings.length) {
+      var grouped = {}, groupOrder = [];
+      findings.forEach(function(f) {
+        var key = f.aspek + '||' + f.persyaratan;
+        if (!grouped[key]) {
+          grouped[key] = { aspek: f.aspek, persyaratan: f.persyaratan, items: [] };
+          groupOrder.push(key);
+        }
+        grouped[key].items.push(f);
+      });
+
+      html += '<div style="display:flex;flex-direction:column;gap:10px">';
+      groupOrder.forEach(function(key) {
+        var g = grouped[key];
+        html +=
+          '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">' +
+            // Group header
+            '<div style="padding:8px 12px;background:var(--bg);border-bottom:1px solid var(--border);' +
+              'font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:.03em">' +
+              escHtml(g.aspek) + ' · ' + escHtml(g.persyaratan) +
             '</div>' +
-            (f.deskripsi_temuan
-              ? '<div style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
-                  escHtml(f.deskripsi_temuan) +
-                '</div>'
-              : '') +
+            // Items
+            g.items.map(function(f, idx) {
+              var isLast = idx === g.items.length - 1;
+              return '<div style="padding:10px 12px;border-left:3px solid var(--rose,#f43f5e);' +
+                (isLast ? '' : 'border-bottom:1px solid var(--border);') + '">' +
+                '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+                  '<span class="badge badge-rose" style="font-size:10px">Non Comply</span>' +
+                  '<span style="font-size:11px;color:var(--text-muted);font-weight:600">#' + f.nomor_persyaratan + '.' + f.check_item_no + '</span>' +
+                '</div>' +
+                '<div style="font-size:13px;color:var(--text);margin-bottom:4px">' + escHtml(f.check_item) + '</div>' +
+                (f.standar_check_item
+                  ? '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:flex;gap:4px">' +
+                      '<i data-lucide="info" style="width:10px;height:10px;flex-shrink:0;margin-top:2px"></i>' +
+                      '<span>' + escHtml(f.standar_check_item) + '</span>' +
+                    '</div>'
+                  : '') +
+                (f.deskripsi_temuan
+                  ? '<div style="font-size:12px;color:var(--rose,#f43f5e);margin-top:4px">' +
+                      '<span style="font-weight:600">Temuan:</span> ' + escHtml(f.deskripsi_temuan) +
+                    '</div>'
+                  : '') +
+              '</div>';
+            }).join('') +
           '</div>';
-        }).join('');
-      lucide.createIcons();
-    }).catch(function() {});
-  }
+      });
+      html += '</div>';
+    } else {
+      html += '<div style="font-size:12px;color:var(--text-muted)">Tidak ada temuan di agenda ini.</div>';
+    }
+
+    el.innerHTML = html;
+    lucide.createIcons(el);
+  }).catch(function() {
+    var el = document.getElementById('agr-hasil-section');
+    if (el) el.innerHTML = '';
+  });
 }
 
 async function _submitAgreementAndFinish(agendaId, periodId) {
   var zone  = document.getElementById('agr-upload-zone');
   var files = zone && zone._getFiles ? zone._getFiles() : [];
   if (!files.length) return toast('Upload foto agreement terlebih dahulu.', 'error');
+  var ofi = (document.getElementById('agr-ofi') || {}).value?.trim();
+  if (!ofi) return toast('Isi kolom OFI terlebih dahulu.', 'error');
   var auditeeNames = (document.getElementById('agr-auditee-names') || {}).value?.trim();
   if (!auditeeNames) return toast('Isi nama auditee yang hadir terlebih dahulu.', 'error');
-  var btn = document.getElementById('agr-submit-btn');
-  var restore = btnLoading(btn, 'Memproses...');
+  var btn     = document.getElementById('agr-submit-btn');
+  var restore = btnLoading(btn, 'Memproses...', 'agreement-modal');
+  // Lock modal — disable tombol ✕ dan klik luar selama proses
+  var modalEl  = document.getElementById('agreement-modal');
+  var closeBtn = modalEl && modalEl.querySelector('.btn-ghost.btn-icon');
+  if (closeBtn) closeBtn.disabled = true;
+  if (modalEl)  modalEl._noClose  = true;
   try {
     var b64 = await filesToBase64([files[0]]);
     var fileUp = b64[0];
     await api('FINISH_AUDIT',     { agenda_id: agendaId, period_id: periodId });
-    await api('SUBMIT_AGREEMENT', { period_id: periodId, agenda_id: agendaId, file_base64: fileUp.base64, file_name: fileUp.name, mime_type: fileUp.mime_type, auditee_hadir_names: auditeeNames });
+    await api('SUBMIT_AGREEMENT', { period_id: periodId, agenda_id: agendaId, file_base64: fileUp.base64, file_name: fileUp.name, mime_type: fileUp.mime_type, ofi: ofi, auditee_hadir_names: auditeeNames });
     clearCache('GET_FINDINGS_BY_AGENDA'); clearCache('GET_ALL_FINDINGS_BY_PERIOD'); clearCache('GET_AGENDAS_BY_PERIOD'); clearCache('GET_DASHBOARD');
     _stopLockPolling();
+    _detachAuditUnloadGuard();
+
+    // Bersihkan semua state dan DOM audit
+    ['audit-save-bar', 'audit-sticky-footer'].forEach(function(id) {
+      var el = document.getElementById(id); if (el) el.remove();
+    });
+    window._auditLockState    = {};
+    window._auditRenderCtx    = null;
+    window._auditDraft        = { activeGroupKey: null, items: {} };
+    window._auditPendingFiles = {};
+
     toast('Audit selesai. Agreement berhasil disubmit.', 'success');
     closeModal('agreement-modal');
-    if (window._auditActiveAreaId) selectAuditArea(window._auditActiveAreaId, periodId);
-    else _backToAuditAreas();
-  } catch(err) { toast(err.message, 'error'); restore(); }
+  } catch(err) {
+    toast(err.message, 'error');
+    restore();
+    // Unlock modal saat error — user boleh Batal
+    var _m = document.getElementById('agreement-modal');
+    var _c = _m && _m.querySelector('.btn-ghost.btn-icon');
+    if (_c) _c.disabled = false;
+    if (_m) _m._noClose = false;
+  }
 }
 
 // ============================================================
 //  Helpers
 // ============================================================
 
-function _emailInCsv(csv, email) {
-  if (!csv || !email) return false;
-  var target = String(email).trim().toLowerCase();
-  return String(csv).split(',').map(function(e) { return e.trim().toLowerCase(); }).indexOf(target) !== -1;
-}
 </script>
