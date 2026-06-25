@@ -1,0 +1,700 @@
+<script>
+// ============================================================
+//  JavaScript.html — v3
+// ============================================================
+
+const App = {
+  profile:       null,
+  activePeriod:  null,
+  currentPage:   'dashboard',
+  currentParams: {},
+  dashboardData: null,
+  cache:         {},
+  ready:         false,
+  sidebarOpen:   true,
+};
+
+// ── API Client ────────────────────────────────────────────────
+function api(action, payload) {
+  payload = payload || {};
+  return new Promise(function(resolve, reject) {
+    var attempts = 0;
+    function attempt() {
+      attempts++;
+      google.script.run
+        .withSuccessHandler(function(result) {
+          if (result === null || result === undefined) {
+            if (attempts < 3) { setTimeout(attempt, 400 * attempts); return; }
+            reject(new Error('Server mengembalikan respons kosong untuk action: ' + action));
+            return;
+          }
+          if (!result.success) {
+            reject(new Error(result.message || 'Terjadi kesalahan.'));
+            return;
+          }
+          try {
+            var data = (result.data !== null && result.data !== undefined)
+              ? JSON.parse(result.data) : null;
+            resolve(data);
+          } catch(e) {
+            resolve(result.data);
+          }
+        })
+        .withFailureHandler(function(err) {
+          if (attempts < 3) { setTimeout(attempt, 400 * attempts); return; }
+          reject(new Error(err.message || String(err)));
+        })
+        .handleApiCall(action, payload);
+    }
+    attempt();
+  });
+}
+
+// ── Cached API ────────────────────────────────────────────────
+function cachedApi(action, payload, ttlSeconds) {
+  payload    = payload || {};
+  ttlSeconds = ttlSeconds || 30;
+  var key    = action + '::' + JSON.stringify(payload);
+  var now    = Date.now();
+  if (App.cache[key] && (now - App.cache[key].ts) < ttlSeconds * 1000) {
+    return Promise.resolve(App.cache[key].data);
+  }
+  return api(action, payload).then(function(data) {
+    App.cache[key] = { data: data, ts: now };
+    return data;
+  });
+}
+
+function clearCache(actionPrefix) {
+  if (!actionPrefix) { App.cache = {}; return; }
+  Object.keys(App.cache).forEach(function(k) {
+    if (k.indexOf(actionPrefix) === 0) delete App.cache[k];
+  });
+}
+
+// ── Drive Image Loader (server-side, bypass firewall) ─────────
+var _driveImgCache = {};
+var _driveImgQueue = {}; // url → [imgEl, ...]  — deduplicate concurrent requests
+
+async function loadDriveImage(url, imgEl) {
+  if (!url || !imgEl) return;
+  // Sudah di-cache — langsung set
+  if (_driveImgCache[url]) {
+    imgEl.src = _driveImgCache[url];
+    imgEl.style.opacity = '1';
+    return;
+  }
+  // Tandai loading
+  imgEl.style.opacity = '0.25';
+
+  // Kalau request ke URL yang sama sedang berjalan, queue saja
+  if (_driveImgQueue[url]) {
+    _driveImgQueue[url].push(imgEl);
+    return;
+  }
+  _driveImgQueue[url] = [imgEl];
+
+  try {
+    var dataUri = await api('GET_DRIVE_IMAGE_BASE64', { url: url });
+    if (dataUri) {
+      _driveImgCache[url] = dataUri;
+      (_driveImgQueue[url] || []).forEach(function(el) {
+        if (el && document.contains(el)) { el.src = dataUri; el.style.opacity = '1'; }
+      });
+    } else {
+      (_driveImgQueue[url] || []).forEach(function(el) { if (el) el.style.display = 'none'; });
+    }
+  } catch(e) {
+    (_driveImgQueue[url] || []).forEach(function(el) { if (el) el.style.display = 'none'; });
+  } finally {
+    delete _driveImgQueue[url];
+  }
+}
+
+// Render img tag dengan data-drive-url; panggil _loadAllDriveImgs() setelah DOM ready
+function _renderDriveImg(url, styleExtra) {
+  return '<img data-drive-url="' + escAttr(url) + '" src="" ' +
+    'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;' +
+    'transition:opacity .2s;opacity:0;' + (styleExtra || '') + '">';
+}
+
+// Dipanggil setelah setiap render/repaint untuk trigger lazy load semua gambar di DOM
+function _loadAllDriveImgs(root) {
+  var container = root || document;
+  container.querySelectorAll('img[data-drive-url]').forEach(function(img) {
+    var url = img.getAttribute('data-drive-url');
+    if (url && !img.getAttribute('data-drive-loading')) {
+      img.setAttribute('data-drive-loading', '1');
+      loadDriveImage(url, img);
+    }
+  });
+}
+
+// ── Router ────────────────────────────────────────────────────
+const Pages = {};
+
+function navigateTo(page, params) {
+  params = params || {};
+  if (!App.ready) {
+    setTimeout(function() { navigateTo(page, params); }, 200);
+    return;
+  }
+  App.currentPage   = page;
+  App.currentParams = params;
+  document.querySelectorAll('.nav-item').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.page === page);
+  });
+  document.querySelectorAll('.mob-nav-item').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.page === page);
+  });
+  // Refresh badge saat kembali ke home atau mytask
+  if (page === 'home' || page === 'mytask') {
+    setTimeout(_fetchAndRenderTaskBadge, 300);
+  }
+  var container = document.getElementById('page-content');
+  container.innerHTML =
+    '<div class="page-loader">' +
+      '<div class="spinner dark"></div>' +
+      '<span>Memuat halaman...</span>' +
+    '</div>';
+  if (Pages[page]) {
+    var result = Pages[page](container, params);
+    if (result && result.finally) {
+      result.finally(function() { renderIcons(); });
+    } else {
+      setTimeout(renderIcons, 100);
+    }
+  } else {
+    container.innerHTML =
+      '<div class="empty-state">' +
+        '<i data-lucide="construction" style="width:48px;height:48px;opacity:.3;margin-bottom:16px"></i>' +
+        '<div class="empty-title">Halaman belum tersedia</div>' +
+      '</div>';
+    renderIcons();
+  }
+}
+
+// ── Single Click Guard ────────────────────────────────────────
+// Mencegah double-click: disable tombol 500ms setelah klik
+function singleClick(btn, fn) {
+  if (!btn || btn._busy) return;
+  btn._busy    = true;
+  btn.disabled = true;
+  try { fn(); } catch(e) { console.error(e); }
+  setTimeout(function() {
+    btn._busy    = false;
+    btn.disabled = false;
+  }, 600);
+}
+
+// ── Toast ─────────────────────────────────────────────────────
+function toast(message, type, duration) {
+  type     = type     || 'info';
+  duration = duration || 4000;
+  var iconMap = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+  var container = document.getElementById('toast-container');
+  var el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.innerHTML = '<span>' + (iconMap[type] || 'ℹ️') + '</span><span>' + escHtml(message) + '</span>';
+  container.appendChild(el);
+  setTimeout(function() {
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(100%)';
+    el.style.transition = '.3s';
+    setTimeout(function() { el.remove(); }, 300);
+  }, duration);
+}
+
+// ── Button Loading ────────────────────────────────────────────
+function btnLoading(btn, loadingText, scopeId) {
+  loadingText = loadingText || 'Memproses...';
+  var originalHTML     = btn.innerHTML;
+  var originalDisabled = btn.disabled;
+  btn.disabled  = true;
+  btn._busy     = true;
+  btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> ' + loadingText;
+  var scopeEls = [];
+  if (scopeId) {
+    var scope = document.getElementById(scopeId);
+    if (scope) {
+      scopeEls = Array.from(scope.querySelectorAll('input,select,textarea,button'));
+      scopeEls.forEach(function(el) { el._wasDisabled = el.disabled; el.disabled = true; });
+    }
+  }
+  return function restore(newLabel) {
+    btn.disabled  = originalDisabled;
+    btn._busy     = false;
+    btn.innerHTML = newLabel || originalHTML;
+    scopeEls.forEach(function(el) { el.disabled = el._wasDisabled || false; });
+  };
+}
+
+// ── Modal ─────────────────────────────────────────────────────
+function openModal(id)  {
+  var el = document.getElementById(id);
+  if (el) el.classList.add('open');
+}
+function closeModal(id) {
+  var el = document.getElementById(id);
+  if (el) el.classList.remove('open');
+}
+
+function createModal(opts) {
+  var id = opts.id, title = opts.title, size = opts.size || '', body = opts.body, footer = opts.footer;
+  // Guard: jika modal sudah open, jangan buka lagi
+  var existing = document.getElementById(id);
+  if (existing) {
+    if (existing.classList.contains('open')) return existing;
+    existing.remove();
+  }
+  var el = document.createElement('div');
+  el.className = 'modal-overlay';
+  el.id = id;
+  el.innerHTML =
+    '<div class="modal ' + size + '">' +
+      '<div class="modal-header">' +
+        '<div class="modal-title">' + escHtml(title) + '</div>' +
+        '<button class="btn btn-ghost btn-icon" onclick="closeModal(\'' + id + '\')">✕</button>' +
+      '</div>' +
+      '<div class="modal-body">' + body + '</div>' +
+      (footer ? '<div class="modal-footer">' + footer + '</div>' : '') +
+    '</div>';
+  el.addEventListener('click', function(e) { if (e.target === el && !el._noClose) closeModal(id); });
+  document.body.appendChild(el);
+  requestAnimationFrame(function() { el.classList.add('open'); });
+  return el;
+}
+
+// ── Upload Helper ─────────────────────────────────────────────
+function setupUploadZone(zoneId, previewId, onFilesChange) {
+  var zone    = document.getElementById(zoneId);
+  var preview = document.getElementById(previewId);
+  if (!zone) return;
+  var files = [];
+  var update = function() {
+    preview.innerHTML = files.map(function(f, i) {
+      var isImg = f.type.startsWith('image/');
+      var objUrl = isImg ? URL.createObjectURL(f) : null;
+      return '<div class="upload-preview" style="position:relative;cursor:' + (isImg ? 'zoom-in' : 'default') + '"' +
+        (isImg ? ' onclick="_openFotoLightbox(\'' + objUrl + '\')"' : '') + '>' +
+        (isImg
+          ? '<img src="' + objUrl + '" alt="" style="width:100%;height:100%;object-fit:cover">'
+          : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:24px;background:var(--bg)">📄</div>') +
+        '<button class="remove-btn" onclick="event.stopPropagation();removeUploadFile(' + i + ',\'' + zoneId + '\',\'' + previewId + '\')" style="position:absolute;top:2px;right:2px">✕</button>' +
+      '</div>';
+    }).join('');
+    if (onFilesChange) onFilesChange(files);
+  };
+  window.removeUploadFile = function(i, z, p) {
+    if (z !== zoneId) return;
+    files.splice(i, 1); update();
+  };
+  // Deteksi mobile
+  var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  // Buat dua tombol di dalam zone kalau mobile
+  if (isMobile) {
+    zone.style.display = 'flex';
+    zone.style.flexDirection = 'column';
+    zone.style.alignItems = 'center';
+    zone.style.gap = '8px';
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:8px;margin-top:4px';
+
+    var btnUpload = document.createElement('button');
+    btnUpload.type = 'button';
+    btnUpload.innerHTML = '<i data-lucide="upload" style="width:13px;height:13px"></i> Pilih File';
+    btnUpload.className = 'btn btn-outline btn-sm';
+    btnUpload.onclick = function(e) {
+      e.stopPropagation();
+      var input = document.createElement('input');
+      input.type = 'file'; input.multiple = true; input.accept = 'image/*,application/pdf';
+      input.onchange = function(ev) { files = files.concat(Array.from(ev.target.files)); update(); };
+      input.click();
+    };
+
+    var btnCamera = document.createElement('button');
+    btnCamera.type = 'button';
+    btnCamera.innerHTML = '<i data-lucide="camera" style="width:13px;height:13px"></i> Ambil Foto';
+    btnCamera.className = 'btn btn-outline btn-sm';
+    btnCamera.onclick = function(e) {
+      e.stopPropagation();
+      var input = document.createElement('input');
+      input.type = 'file'; input.accept = 'image/*'; input.capture = 'environment';
+      input.onchange = function(ev) { files = files.concat(Array.from(ev.target.files)); update(); };
+      input.click();
+    };
+
+    btnRow.appendChild(btnUpload);
+    btnRow.appendChild(btnCamera);
+    zone.appendChild(btnRow);
+    lucide.createIcons(btnRow);
+  } else {
+    zone.addEventListener('click', function() {
+      var input = document.createElement('input');
+      input.type = 'file'; input.multiple = true; input.accept = 'image/*,application/pdf';
+      input.onchange = function(e) { files = files.concat(Array.from(e.target.files)); update(); };
+      input.click();
+    });
+  }
+  zone.addEventListener('dragover',  function(e) { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', function()  { zone.classList.remove('dragover'); });
+  zone.addEventListener('drop', function(e) {
+    e.preventDefault(); zone.classList.remove('dragover');
+    files = files.concat(Array.from(e.dataTransfer.files)); update();
+  });
+  zone._getFiles = function() { return files; };
+  zone._setFiles = function(newFiles) { files = newFiles.slice(); update(); };
+  return { getFiles: function() { return files; } };
+}
+
+function filesToBase64(files) {
+  return Promise.all(Array.from(files).map(function(f) {
+    return new Promise(function(res, rej) {
+      var r = new FileReader();
+      r.onload = function(e) {
+        var dataUrl = e.target.result;
+        var commaIdx = dataUrl.indexOf(',');
+        var base64 = commaIdx >= 0 ? dataUrl.substring(commaIdx + 1) : dataUrl;
+        if (!base64 || base64.length === 0) {
+          rej(new Error('File "' + f.name + '" gagal dikonversi ke base64.'));
+          return;
+        }
+        res({ base64: base64, name: f.name, mime_type: f.type || 'application/octet-stream' });
+      };
+      r.onerror = function() { rej(new Error('Gagal membaca file: ' + f.name)); };
+      r.readAsDataURL(f);
+    });
+  }));
+}
+
+// ── Status Badge ──────────────────────────────────────────────
+function statusBadge(status) {
+  var map = {
+    // Finding status — new
+    'PENDING_VERIFICATION': ['badge-amber',   'Menunggu Verifikasi'],
+    'OPEN':                 ['badge-rose',    'Open'],
+    'TPP_OR_DEPT_HEAD':     ['badge-amber',   'Review TPP — Dept Head'],
+    'TPP_OR_AUDITOR':       ['badge-amber',   'Review TPP — Auditor'],
+    'TPP_OR_KOORDINATOR':   ['badge-amber',   'Review TPP — Koordinator'],
+    'OPEN_IMPL':            ['badge-blue',    'Open Implementasi'],
+    'APP_DEPT_HEAD':        ['badge-purple',  'Approval Impl — Dept Head'],
+    'APP_AUDITOR':          ['badge-purple',  'Approval Impl — Auditor'],
+    'APP_KOORDINATOR':      ['badge-purple',  'Approval Impl — Koordinator'],
+    'CLOSED':               ['badge-emerald', 'Closed'],
+    'OVERDUE':              ['badge-rose',    'Overdue'],
+    // Agenda / period status
+    'PLANNED':    ['badge-slate',   'Planned'],
+    'STARTED':    ['badge-blue',    'Started'],
+    'DONE':       ['badge-emerald', 'Done'],
+    'ACTIVE':     ['badge-emerald', 'Active'],
+    'COMPLETED':  ['badge-blue',    'Completed'],
+    // Result status
+    'Non Comply': ['badge-rose',    'Non Comply'],
+    'Comply':     ['badge-emerald', 'Comply'],
+    // Approval action
+    'APPROVED':   ['badge-emerald', 'Approved'],
+    'REJECTED':   ['badge-rose',    'Rejected'],
+    'PENDING':    ['badge-slate',   'Pending'],
+    // Legacy — bisa dihapus nanti
+    'PENDING_AGREEMENT': ['badge-amber', 'Menunggu Persetujuan'],
+  };
+  var pair = map[status] || ['badge-slate', status || '—'];
+  return '<span class="badge ' + pair[0] + '">' + pair[1] + '</span>';
+}
+
+// ── Utilities ─────────────────────────────────────────────────
+function escHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function formatDate(str) {
+  if (!str) return '—';
+  var d = new Date(str);
+  return isNaN(d) ? str : d.toLocaleDateString('id-ID', { day:'2-digit', month:'short', year:'numeric' });
+}
+function timeAgo(str) {
+  if (!str) return '';
+  var diff = Date.now() - new Date(str).getTime();
+  var m = Math.floor(diff / 60000);
+  if (m < 1)    return 'baru saja';
+  if (m < 60)   return m + ' menit lalu';
+  if (m < 1440) return Math.floor(m/60) + ' jam lalu';
+  return Math.floor(m/1440) + ' hari lalu';
+}
+function getInitials(name) {
+  if (!name) return '?';
+  return name.split(' ').slice(0,2).map(function(w) { return w[0]; }).join('').toUpperCase();
+}
+
+// ── Sidebar Toggle ────────────────────────────────────────────
+function initSidebar() {
+  var saved = localStorage.getItem('sidebarOpen');
+  App.sidebarOpen = saved === null ? true : saved === 'true';
+  applySidebarState(false);
+}
+
+function toggleSidebar() {
+  App.sidebarOpen = !App.sidebarOpen;
+  localStorage.setItem('sidebarOpen', App.sidebarOpen);
+  applySidebarState(true);
+}
+
+function applySidebarState(animate) {
+  var app     = document.getElementById('app');
+  var sidebar = document.getElementById('sidebar');
+  var btnIcon = document.getElementById('sidebar-toggle-icon');
+  if (animate) {
+    sidebar.style.transition = 'width .25s ease';
+    app.style.transition     = 'grid-template-columns .25s ease';
+  } else {
+    sidebar.style.transition = 'none';
+    app.style.transition     = 'none';
+  }
+  if (App.sidebarOpen) {
+    app.classList.remove('sidebar-collapsed');
+    sidebar.classList.remove('collapsed');
+    if (btnIcon) btnIcon.setAttribute('data-lucide', 'panel-left-close');
+  } else {
+    app.classList.add('sidebar-collapsed');
+    sidebar.classList.add('collapsed');
+    if (btnIcon) btnIcon.setAttribute('data-lucide', 'panel-left-open');
+  }
+  lucide.createIcons();
+}
+
+// ── Init ──────────────────────────────────────────────────────
+async function initApp() {
+  App.ready = false;
+  initSidebar();
+
+  try {
+    var initData = await api('GET_INIT_DATA', {});
+    var profileData = initData.profileJson ? JSON.parse(initData.profileJson) : initData.profile;
+    var periodsData = initData.periodsJson ? JSON.parse(initData.periodsJson) : initData.periods;
+
+    App.profile = profileData;
+    App.profile.deptHeadAreas = App.profile.deptHeadAreas ? App.profile.deptHeadAreas.split(',').filter(Boolean) : [];
+    App.profile.auditorAreas  = App.profile.auditorAreas  ? App.profile.auditorAreas.split(',').filter(Boolean)  : [];
+    App.profile.roles         = App.profile.roles         ? App.profile.roles.split(',').filter(Boolean)         : [];
+
+    if (!App.profile.nama || App.profile.nama === App.profile.email) {
+      App.profile.nama = App.profile.email.split('@')[0] || 'User';
+    }
+
+    App.activePeriod = periodsData.find(function(p) { return p.status === 'ACTIVE'; }) || null;
+
+    renderSidebar();
+    renderUserInfo();
+    App.ready = true;
+    // Kalau dibuka dari link email (ada ?page=...), langsung ke halaman tersebut
+    var _startPage   = (typeof _initPage  !== 'undefined' && _initPage)  ? _initPage  : 'home';
+    var _startParams = {};
+    if (typeof _initKey !== 'undefined' && _initKey && typeof _initParam !== 'undefined' && _initParam) {
+      _startParams[_initKey] = _initParam;
+    }
+    navigateTo(_startPage, _startParams);
+    // Background fetch task badge — non-blocking
+    setTimeout(_fetchAndRenderTaskBadge, 500);
+
+  } catch(err) {
+    App.ready = true;
+    document.getElementById('page-content').innerHTML =
+      '<div class="empty-state">' +
+        '<i data-lucide="alert-triangle" style="width:48px;height:48px;opacity:.3;margin-bottom:16px"></i>' +
+        '<div class="empty-title">Gagal memuat aplikasi</div>' +
+        '<div class="empty-desc">' + escHtml(err.message) + '</div>' +
+      '</div>';
+    lucide.createIcons();
+  }
+}
+
+function renderSidebar() {
+  var p = App.profile;
+  var navItems = [
+    { page: 'home',      icon: 'home',           label: 'Beranda',      show: true },
+    { page: 'dashboard', icon: 'bar-chart-2',    label: 'Dashboard',    show: true },
+    { page: 'mytask',    icon: 'list-checks',    label: 'My Task',      show: true },
+    { divider: 'AUDIT' },
+    { page: 'audit',     icon: 'clipboard-list', label: 'Form Audit',   show: p.isAuditor },
+    { divider: 'ADMIN',  show: p.isKoordinator },
+    { page: 'admin',     icon: 'settings',       label: 'Administrasi', show: p.isKoordinator },
+  ];
+
+  // ── Desktop sidebar ───────────────────────────────────────
+  var nav = document.getElementById('sidebar-nav');
+  nav.innerHTML = navItems.map(function(item) {
+    if (item.divider) {
+      if (item.show === false) return '';
+      return '<div class="nav-section-label" data-label="' + item.divider + '">' + item.divider + '</div>';
+    }
+    if (!item.show) return '';
+    return '<div class="nav-item" data-page="' + item.page + '" onclick="navigateTo(\'' + item.page + '\')" title="' + item.label + '">' +
+      '<i data-lucide="' + item.icon + '" style="width:16px;height:16px;flex-shrink:0"></i>' +
+      '<span class="nav-label">' + item.label + '</span>' +
+    '</div>';
+  }).join('');
+
+  // ── Mobile bottom nav — hanya page items, max 5 ───────────
+  var mobileItems = navItems.filter(function(item) {
+    return !item.divider && item.show;
+  }).slice(0, 5); // max 5 items agar tidak terlalu sempit
+
+  var mobileNav = document.getElementById('mobile-nav');
+  if (mobileNav) {
+    mobileNav.innerHTML = mobileItems.map(function(item) {
+      return '<div class="mob-nav-item" data-page="' + item.page + '" onclick="navigateTo(\'' + item.page + '\')">' +
+        '<i data-lucide="' + item.icon + '" style="width:20px;height:20px;flex-shrink:0"></i>' +
+        '<span class="mob-nav-label">' + item.label + '</span>' +
+      '</div>';
+    }).join('');
+  }
+
+  lucide.createIcons();
+}
+
+// ── Background task badge fetch ───────────────────────────────
+async function _fetchAndRenderTaskBadge() {
+  var period = App.activePeriod;
+  if (!period) return;
+  try {
+    var results = await Promise.all([
+      cachedApi('GET_AGENDAS_BY_PERIOD',      { period_id: period.period_id }, 30),
+      cachedApi('GET_ALL_FINDINGS_BY_PERIOD', { period_id: period.period_id }, 15),
+    ]);
+    var agendas  = results[0];
+    var findings = results[1];
+    findings.forEach(function(f) {
+      f._agenda = agendas.find(function(a) { return a.agenda_id === f.agenda_id; });
+    });
+    var tasks = await _buildTaskList(findings, agendas, period);
+    var count = tasks.length;
+    _setNavBadge('mytask', count);
+  } catch(e) {
+    // silent — badge tidak muncul kalau gagal
+  }
+}
+
+function _setNavBadge(page, count) {
+  // Update sidebar desktop
+  var navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
+  if (navItem) {
+    var existing = navItem.querySelector('.nav-badge');
+    if (existing) existing.remove();
+    if (count > 0) {
+      var badge = document.createElement('span');
+      badge.className = 'nav-badge';
+      badge.textContent = count > 99 ? '99+' : count;
+      navItem.appendChild(badge);
+    }
+  }
+  // Update mobile bottom nav
+  var mobItem = document.querySelector('.mob-nav-item[data-page="' + page + '"]');
+  if (mobItem) {
+    var existingMob = mobItem.querySelector('.mob-nav-badge');
+    if (existingMob) existingMob.remove();
+    if (count > 0) {
+      var mobBadge = document.createElement('span');
+      mobBadge.className = 'mob-nav-badge';
+      mobBadge.textContent = count > 99 ? '99+' : count;
+      mobItem.appendChild(mobBadge);
+    }
+  }
+}
+
+function renderUserInfo() {
+  var p = App.profile;
+  var roleLabels = [];
+  if (p.isKoordinator) roleLabels.push('Koordinator');
+  if (p.isDeptHead)    roleLabels.push('Dept Head');
+  if (p.isAuditor)     roleLabels.push('Auditor');
+  if (p.isAuditee && !p.isDeptHead) roleLabels.push('Auditee');
+  if (roleLabels.length === 0) roleLabels.push('Viewer');
+  var nama = p.nama || p.email.split('@')[0] || '?';
+  document.getElementById('sidebar-user').innerHTML =
+    '<div class="user-avatar" title="' + escHtml(nama) + '">' + getInitials(nama) + '</div>' +
+    '<div class="user-info">' +
+      '<div class="user-name">' + escHtml(nama) + '</div>' +
+      '<div class="user-role">' + escHtml(roleLabels.join(' · ')) + '</div>' +
+    '</div>';
+}
+
+function renderIcons() {
+  if (window.lucide) lucide.createIcons();
+}
+
+/**
+ * Konfirmasi custom pengganti confirm() native browser.
+ * @param {object} opts
+ *   title       - judul modal
+ *   message     - pesan utama
+ *   detail      - teks kecil di bawah pesan (opsional)
+ *   confirmText - label tombol konfirmasi (default: 'Ya, Lanjutkan')
+ *   cancelText  - label tombol batal (default: 'Batal')
+ *   danger      - true = tombol konfirmasi merah (untuk hapus/destruktif)
+ * @returns {Promise<boolean>}
+ */
+function showConfirm(opts) {
+  return new Promise(function(resolve) {
+    var id      = 'confirm-modal-' + Date.now();
+    var btnCls  = opts.danger ? 'btn-danger' : 'btn-primary';
+    var confirmText = opts.confirmText || 'Ya, Lanjutkan';
+    var cancelText  = opts.cancelText  || 'Batal';
+
+    createModal({
+      id: id,
+      title: opts.title || 'Konfirmasi',
+      size: 'modal-sm',
+      body:
+        '<div style="text-align:center;padding:8px 0">' +
+          (opts.danger
+            ? '<div style="width:48px;height:48px;border-radius:50%;background:var(--rose-bg,#fff1f2);display:flex;align-items:center;justify-content:center;margin:0 auto 16px">' +
+                '<i data-lucide="triangle-alert" style="width:22px;height:22px;color:var(--rose,#f43f5e)"></i>' +
+              '</div>'
+            : '<div style="width:48px;height:48px;border-radius:50%;background:var(--blue-bg,#eff6ff);display:flex;align-items:center;justify-content:center;margin:0 auto 16px">' +
+                '<i data-lucide="help-circle" style="width:22px;height:22px;color:var(--blue,#3b82f6)"></i>' +
+              '</div>') +
+          '<div style="font-weight:600;font-size:15px;margin-bottom:8px">' + escHtml(opts.message || 'Apakah kamu yakin?') + '</div>' +
+          (opts.detail ? '<div style="font-size:13px;color:var(--text-muted);line-height:1.5">' + escHtml(opts.detail) + '</div>' : '') +
+        '</div>',
+      footer:
+        '<button class="btn btn-outline" id="' + id + '-cancel">' + cancelText + '</button>' +
+        '<button class="btn ' + btnCls + '" id="' + id + '-confirm">' + confirmText + '</button>',
+    });
+    lucide.createIcons();
+
+    document.getElementById(id + '-cancel').onclick  = function() { closeModal(id); resolve(false); };
+    document.getElementById(id + '-confirm').onclick = function() { closeModal(id); resolve(true);  };
+  });
+}
+
+var CONFIG_DOMAIN = 'wingscorp.com';
+/**
+ * Konversi nama lengkap ke email @wingscorp.com
+ * Pola: semua kata kecuali terakhir digabung + "." + kata terakhir
+ * Contoh: "Florean Salsabila Irdana" → "floreansalsabila.irdana@wingscorp.com"
+ * @param {string} name
+ * @returns {string} email atau '' jika nama kosong
+ */
+function nameToEmail(name) {
+  var words = (name || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '';
+  if (words.length === 1) return words[0] + '@' + CONFIG_DOMAIN;
+  var prefix = words.slice(0, -1).join('');
+  var suffix = words[words.length - 1];
+  return prefix + '.' + suffix + '@' + CONFIG_DOMAIN;
+}
+
+/**
+ * Konversi banyak nama (newline atau koma) ke array email
+ * @param {string} namesStr
+ * @returns {string[]}
+ */
+function namesToEmails(namesStr) {
+  return (namesStr || '').split(/[\n,]+/)
+    .map(function(n) { return n.trim(); })
+    .filter(Boolean)
+    .map(nameToEmail);
+}
+
+</script>
