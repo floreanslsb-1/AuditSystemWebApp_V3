@@ -1,0 +1,256 @@
+<script>
+Pages['home'] = function(container) {
+  var p    = App.profile || {};
+  var nama = p.nama || '—';
+
+  var navCards = [
+    {
+      page: 'dashboard',
+      icon: 'bar-chart-2',
+      label: 'Dashboard',
+      desc:  'Ringkasan temuan, status audit, dan progres TPP',
+      color: '#3b82f6',
+      bg:    'rgba(59,130,246,.08)',
+      show:  true,
+    },
+    {
+      page: 'audit',
+      icon: 'clipboard-list',
+      label: 'Form Audit',
+      desc:  'Lakukan audit, isi checklist, dan catat temuan di lapangan',
+      color: '#8b5cf6',
+      bg:    'rgba(139,92,246,.08)',
+      show:  !!p.isAuditor,
+    },
+    {
+      page: 'admin',
+      icon: 'settings',
+      label: 'Administrasi',
+      desc:  'Kelola user, area, checklist template, dan periode audit',
+      color: '#64748b',
+      bg:    'rgba(100,116,139,.08)',
+      show:  !!p.isKoordinator,
+    },
+  ].filter(function(n) { return n.show; });
+
+  var periodHtml = App.activePeriod
+    ? '<div class="lp-period lp-period--active">' +
+        '<span class="lp-period-dot"></span>' +
+        '<span class="lp-period-label">Periode aktif</span>' +
+        '<span class="lp-period-name">' + escHtml(App.activePeriod.nama_periode) + '</span>' +
+      '</div>'
+    : '<div class="lp-period lp-period--inactive">' +
+        '<span class="lp-period-dot lp-period-dot--off"></span>' +
+        '<span class="lp-period-label">Tidak ada periode aktif</span>' +
+      '</div>';
+
+  container.innerHTML =
+    '<style>' +
+      '@import url("https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap");' +
+
+      '.lp-root{' +
+        'min-height:100%;' +
+        'display:flex;flex-direction:column;' +
+        'background:var(--bg);' +
+        'font-family:"DM Sans",system-ui,sans-serif;' +
+        'padding:0;' +
+        'position:relative;overflow:hidden;' +
+      '}' +
+
+      // Decorative background grid
+      '.lp-grid-bg{' +
+        'position:absolute;inset:0;pointer-events:none;z-index:0;' +
+        'background-image:' +
+          'linear-gradient(var(--border) 1px,transparent 1px),' +
+          'linear-gradient(90deg,var(--border) 1px,transparent 1px);' +
+        'background-size:40px 40px;' +
+        'opacity:.4;' +
+        'mask-image:radial-gradient(ellipse 80% 60% at 50% 0%,#000 30%,transparent 100%);' +
+      '}' +
+
+      // Glow orb
+      '.lp-orb{' +
+        'position:absolute;top:-120px;left:50%;transform:translateX(-50%);' +
+        'width:600px;height:320px;border-radius:50%;' +
+        'background:radial-gradient(ellipse,rgba(59,130,246,.13) 0%,transparent 70%);' +
+        'pointer-events:none;z-index:0;' +
+      '}' +
+
+      '.lp-inner{' +
+        'position:relative;z-index:1;' +
+        'max-width:1100px;margin:0 auto;width:100%;' +
+        'padding:40px 40px 36px;' +
+        'display:flex;flex-direction:column;gap:0;' +
+      '}' +
+
+      // Hero section
+      '.lp-hero{' +
+        'display:flex;flex-direction:column;align-items:flex-start;' +
+        'margin-bottom:28px;' +
+        'animation:lpFadeUp .5s ease both;' +
+      '}' +
+
+      '.lp-logo{' +
+        'width:48px;height:48px;border-radius:12px;' +
+        'background:var(--blue,#3b82f6);' +
+        'display:flex;align-items:center;justify-content:center;' +
+        'margin-bottom:20px;' +
+        'box-shadow:0 8px 24px rgba(59,130,246,.25);' +
+      '}' +
+
+      '.lp-eyebrow{' +
+        'font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;' +
+        'color:var(--blue,#3b82f6);margin-bottom:8px;' +
+      '}' +
+
+      '.lp-title{' +
+        'font-family:"DM Serif Display",Georgia,serif;' +
+        'font-size:clamp(28px,4vw,40px);' +
+        'font-weight:400;line-height:1.15;' +
+        'color:var(--text,#0f172a);' +
+        'margin-bottom:12px;' +
+        'letter-spacing:-.02em;' +
+      '}' +
+
+      '.lp-title em{' +
+        'font-style:italic;color:var(--blue,#3b82f6);' +
+      '}' +
+
+      '.lp-subtitle{' +
+        'font-size:14px;color:var(--text-muted);line-height:1.65;' +
+        'max-width:480px;margin-bottom:20px;' +
+        'font-weight:300;' +
+      '}' +
+
+      '.lp-period{' +
+        'display:inline-flex;align-items:center;gap:7px;' +
+        'padding:5px 12px;border-radius:20px;' +
+        'background:var(--surface);border:1px solid var(--border);' +
+        'font-size:12px;' +
+      '}' +
+      '.lp-period--active .lp-period-label{color:var(--text-muted);}' +
+      '.lp-period--active .lp-period-name{font-weight:600;color:var(--text);}' +
+      '.lp-period--inactive{color:var(--text-muted);}' +
+      '.lp-period-dot{' +
+        'width:7px;height:7px;border-radius:50%;' +
+        'background:var(--emerald,#10b981);' +
+        'box-shadow:0 0 0 2px rgba(16,185,129,.2);' +
+        'animation:lpPulse 2s ease-in-out infinite;' +
+      '}' +
+      '.lp-period-dot--off{background:var(--border);animation:none;box-shadow:none;}' +
+
+      // Divider
+      '.lp-section-label{' +
+        'font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;' +
+        'color:var(--text-muted);margin-bottom:12px;' +
+        'display:flex;align-items:center;gap:10px;' +
+      '}' +
+      '.lp-section-label::after{' +
+        'content:"";flex:1;height:1px;background:var(--border);' +
+      '}' +
+
+      // Nav cards grid
+      '.lp-cards{' +
+        'display:grid;' +
+        'grid-template-columns:repeat(auto-fill,minmax(160px,1fr));' +
+        'gap:10px;margin-bottom:28px;' +
+      '}' +
+
+      '.lp-card{' +
+        'padding:16px;' +
+        'border:1px solid var(--border);' +
+        'border-radius:10px;' +
+        'background:var(--surface);' +
+        'cursor:pointer;' +
+        'transition:border-color .18s,box-shadow .18s,transform .18s;' +
+        'animation:lpFadeUp .5s ease both;' +
+        'position:relative;overflow:hidden;' +
+      '}' +
+      '.lp-card::before{' +
+        'content:"";position:absolute;inset:0;opacity:0;transition:opacity .18s;' +
+      '}' +
+      '.lp-card:hover{' +
+        'transform:translateY(-2px);' +
+        'box-shadow:0 8px 24px rgba(0,0,0,.07);' +
+      '}' +
+
+      '.lp-card-icon{' +
+        'width:32px;height:32px;border-radius:8px;' +
+        'display:flex;align-items:center;justify-content:center;' +
+        'margin-bottom:10px;' +
+      '}' +
+
+      '.lp-card-title{' +
+        'font-size:13px;font-weight:600;margin-bottom:3px;color:var(--text);' +
+      '}' +
+
+      '.lp-card-desc{' +
+        'font-size:11px;color:var(--text-muted);line-height:1.55;' +
+        'font-weight:300;' +
+      '}' +
+
+      '.lp-card-arrow{' +
+        'position:absolute;top:14px;right:14px;' +
+        'opacity:0;transform:translateX(-4px);' +
+        'transition:opacity .18s,transform .18s;' +
+        'color:var(--text-muted);' +
+      '}' +
+      '.lp-card:hover .lp-card-arrow{opacity:1;transform:translateX(0);}' +
+
+      // Animations
+      '@keyframes lpFadeUp{' +
+        'from{opacity:0;transform:translateY(12px);}' +
+        'to{opacity:1;transform:translateY(0);}' +
+      '}' +
+      '@keyframes lpPulse{' +
+        '0%,100%{box-shadow:0 0 0 2px rgba(16,185,129,.2);}' +
+        '50%{box-shadow:0 0 0 5px rgba(16,185,129,.08);}' +
+      '}' +
+    '</style>' +
+
+    '<div class="lp-root">' +
+      '<div class="lp-grid-bg"></div>' +
+      '<div class="lp-orb"></div>' +
+
+      '<div class="lp-inner">' +
+
+        // Hero
+        '<div class="lp-hero">' +
+          '<div class="lp-logo">' +
+            '<i data-lucide="shield-check" style="width:24px;height:24px;color:#fff"></i>' +
+          '</div>' +
+          '<div class="lp-eyebrow">Integrated Management System Department · PT Sayap Mas Utama</div>' +
+          '<h1 class="lp-title">Sistem Audit <em>Internal</em><br>Terintegrasi</h1>' +
+          '<p class="lp-subtitle">' +
+            'Platform terpadu untuk mengelola checklist audit, temuan, Tindakan Perbaikan dan Pencegahan (TPP), serta laporan — dari lapangan hingga persetujuan akhir.' +
+          '</p>' +
+          periodHtml +
+        '</div>' +
+
+        // Cards
+        '<div class="lp-section-label">Menu Utama</div>' +
+        '<div class="lp-cards">' +
+          navCards.map(function(n, i) {
+            return '<div class="lp-card" ' +
+              'style="animation-delay:' + (i * 0.06) + 's" ' +
+              'onclick="navigateTo(\'' + n.page + '\')" ' +
+              'onmouseover="this.style.borderColor=\'' + n.color + '\'" ' +
+              'onmouseout="this.style.borderColor=\'var(--border)\'">' +
+              '<div class="lp-card-icon" style="background:' + n.bg + '">' +
+                '<i data-lucide="' + n.icon + '" style="width:15px;height:15px;color:' + n.color + '"></i>' +
+              '</div>' +
+              '<div class="lp-card-title">' + escHtml(n.label) + '</div>' +
+              '<div class="lp-card-desc">' + escHtml(n.desc) + '</div>' +
+              '<div class="lp-card-arrow">' +
+                '<i data-lucide="arrow-right" style="width:13px;height:13px"></i>' +
+              '</div>' +
+            '</div>';
+          }).join('') +
+        '</div>' +
+
+      '</div>' +
+    '</div>';
+
+  lucide.createIcons();
+};
+</script>
